@@ -21,6 +21,7 @@ from controllers.pddl.problem_builder import ProblemBuilder
 from simulator.entities import Food, OvercookedState, Plate
 from simulator.environment import Environment
 
+from .config import CONFIG
 from .kitchen import (
     DIRTY_PLATE,
     EMPTY_PLATE,
@@ -67,21 +68,25 @@ class DefaultProblemGenerator(ProblemGenerator):
         kitchen = Kitchen(environment, controlled_agent_ids)
         domain = build_domain()
         last: PDDLProblem | None = None
-        for entries, seconds in goal_sets(kitchen, self.horizon):
+        horizon = self.horizon or CONFIG.horizon
+        for entries, seconds in goal_sets(kitchen, horizon):
             if not entries:
                 return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
             best: tuple | None = None
             # Two models: one that keeps every tip, and one allowed quicker
             # but tip-losing moves. Each is planned and tried out, and the
             # one that earns more (orders first, then tips, then speed) wins.
-            for fast in (True, False):
+            models = {"both": (True, False), "fast": (True,), "safe": (False,)}
+            for fast in models.get(CONFIG.models, (True, False)):
                 problem = PDDLProblem(
                     domain=domain, problem=build_problem(kitchen, entries, fast=fast)
                 )
                 last = last or problem
                 # The tip-keeping model is much harder to plan in divided
                 # kitchens, so it only gets a short try.
-                limit = seconds if fast else min(seconds, TIP_SAFE_SECONDS)
+                limit = seconds if fast or CONFIG.models == "safe" else min(
+                    seconds, CONFIG.tip_safe_seconds
+                )
                 steps = probe(problem, limit)
                 if steps is None:
                     continue
@@ -112,6 +117,8 @@ class DefaultProblemGenerator(ProblemGenerator):
             self._delivered = queue.delivered_count
         else:
             served = queue.delivered_count - self._delivered
+            if served and CONFIG.replan_on_delivery:
+                return self._reset()
             if (
                 queue.expired_count != self._expired
                 or not _sub_multiset(orders, self._orders)
@@ -226,7 +233,6 @@ def kitchen_signature(environment: Environment) -> tuple:
 # Planning time allowed for checking each goal set, in seconds.
 FIRST_PROBE_SECONDS = 10.0
 LATER_PROBE_SECONDS = 4.0
-TIP_SAFE_SECONDS = 3.0
 
 
 def goal_sets(kitchen: Kitchen, horizon: int | None = None):
@@ -569,11 +575,14 @@ def queued_orders(kitchen: Kitchen) -> list:
         # until the ticket appears.
         entries = entries + list(queue.pending)
     if not in_turn:
-        entries.sort(
-            key=lambda e: (
-                float("inf") if e.time_limit is None else e.revealed_at + e.time_limit
-            )
-        )
+
+        def deadline(e) -> float:
+            return float("inf") if e.time_limit is None else e.revealed_at + e.time_limit
+
+        if CONFIG.order_sort == "reward":
+            entries.sort(key=lambda e: (-e.reward, deadline(e)))
+        else:
+            entries.sort(key=deadline)
     return entries
 
 

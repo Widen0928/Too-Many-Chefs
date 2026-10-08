@@ -36,12 +36,20 @@ def max_score(path: str) -> int:
     return total
 
 
+EXPERIMENT: str | None = None
+
+
 def run(level: str) -> tuple[dict, float]:
+    import os
+
     start = time.time()
+    env = dict(os.environ)
+    if EXPERIMENT:
+        env["TMC_EXPERIMENT"] = EXPERIMENT
     out = subprocess.run(
         ["uv", "run", "cook", "agent", "--level", level, "--headless", "--quiet",
          "--max-timesteps", "1500", "--time-limit", "300"],
-        cwd=ROOT, capture_output=True, text=True,
+        cwd=ROOT, capture_output=True, text=True, env=env,
     )
     text = out.stdout
     try:
@@ -56,7 +64,11 @@ def main() -> None:
     parser.add_argument("pattern")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--exclude", nargs="*", default=["mid_service", "out_of_stock"])
+    parser.add_argument("--experiment", default=None, help="JSON for TMC_EXPERIMENT")
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    global EXPERIMENT
+    EXPERIMENT = args.experiment
     levels = sorted(
         p for p in glob.glob(args.pattern) if not any(x in p for x in args.exclude)
     )
@@ -69,9 +81,12 @@ def main() -> None:
         got += s
         best += m
         err = (result.get("error") or {}).get("type", "") if result.get("error") else ""
+        if args.quiet:
+            continue
         print(f"{Path(level).stem[:60]:60s} {s:4d}/{m:4d} d={result.get('orders_delivered')}"
               f" t={result.get('timesteps')} {seconds:5.1f}s {result.get('reason')} {err}")
-    print(f"TOTAL {got}/{best} = {got / max(best, 1):.4f}")
+    slowest = max(seconds for _, seconds in results) if results else 0
+    print(f"TOTAL {got}/{best} = {got / max(best, 1):.4f}  slowest {slowest:.1f}s  {EXPERIMENT or 'default'}")
 
 
 if __name__ == "__main__":

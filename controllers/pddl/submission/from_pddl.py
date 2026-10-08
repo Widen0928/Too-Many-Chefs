@@ -38,6 +38,7 @@ from simulator.mutations.agent_mutation import AgentMutation
 from simulator.mutations.cooking import current_timer
 from simulator.entities import Food
 
+from .config import CONFIG
 from .dispatch import Options, dispatch
 from .kitchen import Kitchen, chef_symbol, parse_loc
 from .rollout import simulate
@@ -106,7 +107,7 @@ _CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
 
 def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
     try:
-        text = environment.model_dump_json() + repr(steps)
+        text = environment.model_dump_json() + repr(steps) + repr(CONFIG)
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
         return None
@@ -138,6 +139,11 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
 
     ``None`` stands for the planner's own choice of chefs.
     """
+    if CONFIG.candidates == "small":
+        yield Options()
+        yield Options(move_stations="off", split_cooks=False, split_plates=False)
+        yield None
+        return
     for move in ("any", "off"):
         for split in (True, False):
             yield Options(move_stations=move, split_cooks=split, split_plates=split)
