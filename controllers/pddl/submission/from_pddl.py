@@ -272,6 +272,9 @@ class _Translator:
             loc,
         )
 
+    def _station_onto_plate_tended(self, *args: str):
+        return self._station_onto_plate(*args)
+
     def _plate_into_station(
         self, chef: str, s: str, loc: str, p: str, f: str, e: str
     ):

@@ -88,8 +88,10 @@ class Station:
 
     symbol: str
     entity: Equipment
-    location: Location
+    location: Location | None
     supported: bool = True
+    # The chef holding this station, if a chef is carrying it.
+    holder: str | None = None
 
     @property
     def name(self) -> str:
@@ -307,6 +309,22 @@ class Kitchen:
                         supported=self._is_supported(equipment, equipments),
                     )
                 )
+        # A pan, pot or bowl a chef is carrying.
+        for agent in self.environment.get_entities_of_type(Agent):
+            if agent.held_item_id is None:
+                continue
+            equipment = self.environment.get_entity_as(agent.held_item_id, Equipment)
+            if equipment is None or isinstance(equipment, Plate):
+                continue
+            stations.append(
+                Station(
+                    symbol=f"s_held_{pddl_name(agent.id)}_{short_name(equipment.name)}",
+                    entity=equipment,
+                    location=None,
+                    supported=False,
+                    holder=agent.id,
+                )
+            )
         return stations
 
     def burns(self, station: Station) -> bool:
@@ -356,7 +374,7 @@ class Kitchen:
             | self.deliveries
             | self.bins
             | self.sinks
-            | {station.location for station in self.stations}
+            | {station.location for station in self.stations if station.location}
             | self.support_locations
         )
 

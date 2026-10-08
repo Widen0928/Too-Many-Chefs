@@ -48,8 +48,9 @@
     (st_empty ?s - station)
     (in ?f - food ?s - station)
     (fixed ?s - station)
-    ; A station is usable while it stands where it works: fixed stations
-    ; always, a pan or bowl only on its stove or mixer.
+    ; A station cooks only while it stands where it works: fixed stations
+    ; always, a pan or bowl only on its stove or mixer. Food can still be
+    ; put in or taken out of a pan standing on a bare counter.
     (usable ?s - station)
     (portable ?s - station)
     (holds_st ?c - chef ?s - station)
@@ -62,6 +63,11 @@
     (cook_by_hand ?s - station ?f - food ?o - food)
     (cook_auto ?s - station ?f - food ?o - food)
     (st_to_plate ?s - station ?p - pstate ?f - food ?q - pstate)
+    ; Food in a station that would burn it is collected by the chef who put
+    ; it in (tending), so nobody wanders off and leaves it to burn. Other
+    ; stations are open to anyone.
+    (open_station ?s - station)
+    (tending ?c - chef ?s - station)
 
     ; --- plates ---
     (plating ?p - pstate ?f - food ?q - pstate)
@@ -190,16 +196,16 @@
 
   (:action put_in_station
     :parameters (?c - chef ?s - station ?l - loc ?f - food)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (st_empty ?s)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (st_empty ?s)
                        (accepts ?s ?f))
     :effect (and (hand_empty ?c) (not (holds ?c ?f))
-                 (in ?f ?s) (not (st_empty ?s)))
+                 (in ?f ?s) (not (st_empty ?s)) (tending ?c ?s))
   )
 
   ; Held food mixed into what the station holds; the result stays inside.
   (:action add_to_station
     :parameters (?c - chef ?s - station ?l - loc ?f - food ?e - food ?o - food)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
                        (merge_in ?s ?f ?e ?o))
     :effect (and (hand_empty ?c) (not (holds ?c ?f))
                  (in ?o ?s) (not (in ?e ?s)))
@@ -208,7 +214,7 @@
   ; Held food combined with the station's food; the chef keeps the result.
   (:action combine_from_station
     :parameters (?c - chef ?s - station ?l - loc ?f - food ?e - food ?o - food)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
                        (merge_hand ?s ?f ?e ?o))
     :effect (and (holds ?c ?o) (not (holds ?c ?f))
                  (st_empty ?s) (not (in ?e ?s)))
@@ -217,7 +223,7 @@
   ; Take food out of a station that cannot be lifted, such as a cutboard.
   (:action take_out
     :parameters (?c - chef ?s - station ?l - loc ?f - food)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (hand_empty ?c) (fixed ?s)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (hand_empty ?c) (fixed ?s)
                        (in ?f ?s))
     :effect (and (holds ?c ?f) (not (hand_empty ?c))
                  (st_empty ?s) (not (in ?f ?s)))
@@ -241,26 +247,35 @@
   ; Station food moved onto the held plate.
   (:action station_onto_plate
     :parameters (?c - chef ?s - station ?l - loc ?f - food ?p - pstate ?q - pstate)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (in ?f ?s)
-                       (st_to_plate ?s ?p ?f ?q))
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (in ?f ?s)
+                       (st_to_plate ?s ?p ?f ?q) (open_station ?s))
     :effect (and (holds ?c ?q) (not (holds ?c ?p))
                  (st_empty ?s) (not (in ?f ?s)))
+  )
+
+  ; The same, for the chef tending a station that would burn the food.
+  (:action station_onto_plate_tended
+    :parameters (?c - chef ?s - station ?l - loc ?f - food ?p - pstate ?q - pstate)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (in ?f ?s)
+                       (st_to_plate ?s ?p ?f ?q) (tending ?c ?s))
+    :effect (and (holds ?c ?q) (not (holds ?c ?p))
+                 (st_empty ?s) (not (in ?f ?s)) (not (tending ?c ?s)))
   )
 
   ; The held plate's food poured into an empty station.
   (:action plate_into_station
     :parameters (?c - chef ?s - station ?l - loc ?p - pstate ?f - food ?e - pstate)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (plate_of ?p ?f)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (plate_of ?p ?f)
                        (st_empty ?s) (accepts ?s ?f) (empty_plate ?e))
     :effect (and (holds ?c ?e) (not (holds ?c ?p))
-                 (in ?f ?s) (not (st_empty ?s)))
+                 (in ?f ?s) (not (st_empty ?s)) (tending ?c ?s))
   )
 
   ; The held plate's food mixed into what the station holds.
   (:action plate_add_to_station
     :parameters (?c - chef ?s - station ?l - loc ?p - pstate ?f - food ?g - food
                  ?o - food ?e - pstate)
-    :precondition (and (usable ?s) (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (plate_of ?p ?f)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?p) (plate_of ?p ?f)
                        (in ?g ?s) (merge_in ?s ?f ?g ?o) (empty_plate ?e))
     :effect (and (holds ?c ?e) (not (holds ?c ?p))
                  (in ?o ?s) (not (in ?g ?s)))

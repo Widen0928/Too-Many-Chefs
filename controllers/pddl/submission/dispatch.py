@@ -58,11 +58,14 @@ END = {
 }
 # Steps that act on a station: (station parameter, location parameter).
 STATION_STEPS = {
+    "station_onto_plate_tended",
     "put_in_station", "add_to_station", "combine_from_station", "take_out", "cook",
     "station_onto_plate", "plate_into_station", "plate_add_to_station",
 }
 FILL_STEPS = {"put_in_station", "plate_into_station"}
-EMPTY_STEPS = {"take_out", "station_onto_plate", "combine_from_station"}
+EMPTY_STEPS = {
+    "take_out", "station_onto_plate", "station_onto_plate_tended", "combine_from_station",
+}
 # Steps whose target can be swapped for any tile of the same kind.
 STORAGE_STEPS = {"take_food", "take_food_onto_plate"}
 BIN_STEPS = {"discard_food", "discard_from_plate"}
@@ -231,19 +234,34 @@ class _Dispatcher:
             station = job.steps[-1][1].parameters[1]
             if station not in risky:
                 continue
-            for later in jobs[i + 1 :]:
-                if any(station in step.parameters for _, step in later.steps):
-                    if later.pinned:
-                        break
-                    first = later.steps[0][0]
-                    count = len(job.steps)
-                    moved = [
-                        (first - 0.5 + k / (2 * count + 2), step)
-                        for k, (_, step) in enumerate(job.steps)
-                    ]
-                    later.steps = moved + later.steps
-                    deferred.add(id(job))
+            put_index = job.steps[-1][0]
+            # The step that takes this food out again, with nothing else
+            # going into the station first.
+            taker = None
+            for index, step in enumerate(self.steps):
+                if index <= put_index or _station_of(step) != station:
+                    continue
+                if step.name in EMPTY_STEPS:
+                    taker = step
+                if step.name not in ("cook", "cook_by_itself"):
                     break
+            if taker is None:
+                continue
+            later = next(
+                (j for j in jobs if any(st is taker for _, st in j.steps)), None
+            )
+            if later is None or later.pinned or later is job:
+                continue
+            first = later.steps[0][0]
+            if first <= put_index:
+                continue
+            count = len(job.steps)
+            moved = [
+                (first - 0.5 + k / (2 * count + 2), step)
+                for k, (_, step) in enumerate(job.steps)
+            ]
+            later.steps = moved + later.steps
+            deferred.add(id(job))
         return [j for j in items if id(j) not in deferred]
 
     def _burnable_stations(self) -> set[str]:
@@ -258,7 +276,9 @@ class _Dispatcher:
             c: (chef.x, chef.y) for c, chef in self.chefs.items()
         }
         at_target: dict[str, Location | None] = {c: None for c in self.chefs}
-        ready: dict[object, float] = {}
+        # Resource -> (plan index, time) of each use so far. A step waits only
+        # for uses that come before it in the plan.
+        ready: dict[object, list[tuple[float, float]]] = {}
         # A chef's jobs must not interleave in plan order: if they did, a job
         # could end up waiting on a later step of the same chef.
         last_index = {c: -1 for c in self.chefs}
@@ -307,19 +327,19 @@ class _Dispatcher:
             free[c] = finish
             last_index[c] = job.steps[-1][0]
             at_target[c] = last_target
-            for key, time in touched.items():
-                ready[key] = max(ready.get(key, 0.0), time)
+            for key, uses in touched.items():
+                ready.setdefault(key, []).extend(uses)
             result.extend(new_steps)
 
         result.sort(key=lambda pair: pair[0])
         return [step for _, step in result]
 
     def _simulate(self, job: Job, c: str, time: float, start: Location,
-                  at: Location | None, ready: dict[object, float]):
+                  at: Location | None, ready: dict[object, list[tuple[float, float]]]):
         """Walk chef ``c`` through ``job``; None if it cannot reach a tile."""
         reach = self.reach[c]
         new_steps: list[tuple[int, PDDLPlanStep]] = []
-        touched: dict[object, float] = {}
+        touched: dict[object, list[tuple[float, float]]] = {}
         moves: dict[int, str] = {}
         pockets: dict[Location, str] = {}
         for index, step in job.steps:
@@ -339,13 +359,16 @@ class _Dispatcher:
                 time += self._walk(c, at, start, target)
                 key = self._resource(step, target)
                 if key is not None:
-                    time = max(time, ready.get(key, 0.0), touched.get(key, 0.0))
+                    for uses in (ready.get(key, ()), touched.get(key, ())):
+                        for used_at, done in uses:
+                            if used_at < index:
+                                time = max(time, done)
                 at = target
             time += self._duration(step)
             if target is not None:
                 key = self._resource(step, target)
                 if key is not None:
-                    touched[key] = time + self._cook_delay(step)
+                    touched.setdefault(key, []).append((index, time + self._cook_delay(step)))
             new_steps.append((index, _with_chef(step, c)))
         return time, new_steps, at, touched, moves, pockets
 

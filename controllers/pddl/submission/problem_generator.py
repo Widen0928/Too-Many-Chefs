@@ -345,19 +345,26 @@ def describe_stations(kitchen: Kitchen, problem: ProblemBuilder) -> None:
     """
     foods = kitchen.food_names
     for station in kitchen.stations:
-        if loc_symbol(station.location) not in problem.objects:
+        if station.holder is not None:
+            # Carried by a chef: it can be set down, then used.
+            if chef_symbol(station.holder) not in problem.objects:
+                continue
+            s = problem.add_object(station.symbol, "station")
+            problem.add_fact(f"(holds_st {chef_symbol(station.holder)} {s})")
+        elif loc_symbol(station.location) not in problem.objects:
             continue
-        s = problem.add_object(station.symbol, "station")
+        else:
+            s = problem.add_object(station.symbol, "station")
+            problem.add_fact(f"(st_at {s} {loc_symbol(station.location)})")
         name = station.name
         burns = kitchen.burns(station)
-        problem.add_fact(f"(st_at {s} {loc_symbol(station.location)})")
         if not station.entity.portable:
             problem.add_fact(f"(fixed {s})")
         elif not station.supported:
             # Only a station left off its stove or mixer may be moved; the
             # others stay put, which keeps pointless carrying out of plans.
             problem.add_fact(f"(portable {s})")
-            counter = kitchen.counters.get(station.location)
+            counter = kitchen.counters.get(station.location) if station.location else None
             if counter is not None and counter.held_item_id == station.entity.id and not station.supported:
                 problem.add_fact(f"(st_on_counter {s} {loc_symbol(station.location)})")
             for support in kitchen.supports_for(station):
@@ -368,7 +375,13 @@ def describe_stations(kitchen: Kitchen, problem: ProblemBuilder) -> None:
                     problem.add_fact(f"(base_free {loc_symbol(support)})")
         if station.supported:
             problem.add_fact(f"(usable {s})")
+        if not burns:
+            problem.add_fact(f"(open_station {s})")
         contents = kitchen.station_food(station)
+        if contents is not None and burns:
+            # Already cooking: any chef may collect it.
+            for chef in kitchen.chefs:
+                problem.add_fact(f"(tending {chef_symbol(chef.id)} {s})")
         if contents is None:
             problem.add_fact(f"(st_empty {s})")
         else:
@@ -526,7 +539,9 @@ def feasible_orders(kitchen: Kitchen, entries: list) -> list:
         if loc in reachable
     }
     equipment = {
-        station.name for station in kitchen.stations if station.location in reachable
+        station.name
+        for station in kitchen.stations
+        if station.location in reachable or station.holder is not None
     }
     stock: dict[str, int] = {}
     for food in kitchen.environment.get_entities_of_type(Food):
