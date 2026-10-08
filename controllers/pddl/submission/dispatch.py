@@ -81,19 +81,37 @@ class Job:
     steps: list[tuple[int, PDDLPlanStep]] = field(default_factory=list)
     chef: str | None = None  # original chef symbol
     pinned: bool = False  # must stay with its chef (it was holding at the start)
+    # A chop or press of cook: needs no hands, so any chef can do it, at any
+    # point in its own queue.
+    hands_free: bool = False
 
 
-def dispatch(kitchen: Kitchen, steps: list[PDDLPlanStep]) -> list[PDDLPlanStep]:
+@dataclass(frozen=True)
+class Options:
+    """Variations of the dispatcher, tried side by side by from_pddl.py."""
+
+    move_stations: bool = True
+    split_cooks: bool = True
+    # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
+    exclude: frozenset[str] = frozenset()
+
+
+def dispatch(
+    kitchen: Kitchen, steps: list[PDDLPlanStep], options: Options = Options()
+) -> list[PDDLPlanStep]:
     try:
-        return _Dispatcher(kitchen, steps).run()
+        return _Dispatcher(kitchen, steps, options).run()
     except Exception:  # noqa: BLE001 - the original plan is always valid
         return steps
 
 
 class _Dispatcher:
-    def __init__(self, kitchen: Kitchen, steps: list[PDDLPlanStep]) -> None:
+    def __init__(
+        self, kitchen: Kitchen, steps: list[PDDLPlanStep], options: Options = Options()
+    ) -> None:
         self.k = kitchen
         self.steps = steps
+        self.options = options
         plan_chefs = {s.parameters[0] for s in steps if _has_chef(s)}
         teams = {
             chef.team for chef in kitchen.environment_agents() if chef_symbol(chef.id) in plan_chefs
@@ -101,7 +119,9 @@ class _Dispatcher:
         self.chefs = {
             chef_symbol(chef.id): chef
             for chef in kitchen.environment_agents()
-            if chef.x is not None and (chef_symbol(chef.id) in plan_chefs or chef.team in teams)
+            if chef.x is not None
+            and (chef_symbol(chef.id) in plan_chefs or chef.team in teams)
+            and not (chef_symbol(chef.id) in options.exclude and chef.held_item_id is None)
         }
         self.regions = {
             c: kitchen.region(chef.x, chef.y) for c, chef in self.chefs.items()
@@ -142,7 +162,7 @@ class _Dispatcher:
         }
         self.spares: dict[str, list[str]] = {}
         for station in self.k.stations:
-            self.spares[station.symbol] = [
+            self.spares[station.symbol] = [] if not self.options.move_stations else [
                 other.symbol
                 for other in self.k.stations
                 if other.name == station.name
@@ -189,6 +209,11 @@ class _Dispatcher:
                 out.append((index, step))
                 continue
             c = step.parameters[0]
+            if step.name == "cook" and self.options.split_cooks:
+                # The chef planned for it may be carrying something; anyone
+                # nearby can press instead while it carries on.
+                out.append(Job(steps=[(index, step)], chef=c, hands_free=True))
+                continue
             job = open_jobs.get(c)
             if job is None:
                 job = Job(chef=c)
@@ -289,15 +314,16 @@ class _Dispatcher:
                 continue
             job = item
             # A chef whose hands are full can only carry on with its own job.
-            candidates = (
-                [job.chef]
-                if job.pinned
-                else [c for c in self.chefs if c not in hands_full]
-            )
+            if job.pinned:
+                candidates = [job.chef]
+            elif job.hands_free:
+                candidates = list(self.chefs)
+            else:
+                candidates = [c for c in self.chefs if c not in hands_full]
             best = None
             first = job.steps[0][0]
             for c in candidates:
-                if last_index[c] > first:
+                if last_index[c] > first and not job.hands_free:
                     continue
                 trial = self._simulate(job, c, free[c], pos[c], at_target[c], ready)
                 if trial is None:
@@ -324,8 +350,10 @@ class _Dispatcher:
                 print(f"{c:12s} {free[c]:6.1f}->{finish:6.1f} "
                       + "; ".join(f"{i}:{st.name} {' '.join(st.parameters[1:])}" for i, st in new_steps))
             free[c] = finish
-            last_index[c] = job.steps[-1][0]
-            if job.steps[-1][1].name in END:
+            last_index[c] = max(last_index[c], job.steps[-1][0])
+            if job.hands_free:
+                pass
+            elif job.steps[-1][1].name in END:
                 hands_full.discard(c)
             else:
                 hands_full.add(c)

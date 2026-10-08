@@ -33,8 +33,9 @@ from simulator.mutations.agent_mutation import AgentMutation
 from simulator.mutations.cooking import current_timer
 from simulator.entities import Food
 
-from .dispatch import dispatch
-from .kitchen import Kitchen, parse_loc
+from .dispatch import Options, dispatch
+from .kitchen import Kitchen, chef_symbol, parse_loc
+from .rollout import simulate
 
 
 class DefaultFromPDDL(FromPDDL):
@@ -43,14 +44,49 @@ class DefaultFromPDDL(FromPDDL):
 
     def from_pddl(self, steps: list[PDDLPlanStep]) -> list[MutationWithLocation]:
         kitchen = Kitchen(self._environment)
-        steps = dispatch(kitchen, steps)
+        left_out = _orders_left_out(kitchen, steps)
+        best: tuple | None = None
+        seen: list[list] = []
+        for options in candidate_options(kitchen, steps):
+            if options is None:
+                chosen = steps  # the planner's own assignment
+            else:
+                chosen = dispatch(kitchen, steps, options)
+            if chosen in seen:
+                continue
+            seen.append(chosen)
+            plan = self.translate_all(kitchen, chosen, left_out)
+            outcome = simulate(self._environment, plan)
+            if best is None or outcome.key() > best[0]:
+                best = (outcome.key(), plan)
+        return best[1] if best is not None else []
+
+    def translate_all(
+        self, kitchen: Kitchen, steps: list[PDDLPlanStep], left_out: bool
+    ) -> list[MutationWithLocation]:
         translator = _Translator(kitchen)
         plan: list[MutationWithLocation] = []
         for step in steps:
             plan.extend(translator.translate(step))
-        if plan and _orders_left_out(kitchen, steps):
+        if plan and left_out:
             plan.append(_wait_to_replan(plan[-1]))
         return plan
+
+
+def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
+    """Ways of handing out the plan's jobs, to be compared by rollout.
+
+    ``None`` stands for the planner's own choice of chefs.
+    """
+    yield Options()
+    yield Options(move_stations=False)
+    yield Options(split_cooks=False)
+    yield None
+    chefs = [chef_symbol(a.id) for a in kitchen.chefs]
+    if len(chefs) >= 3:
+        # A crowded kitchen may go faster, and jam less, with a chef fewer.
+        for chef in chefs:
+            yield Options(exclude=frozenset({chef}))
 
 
 def _orders_left_out(kitchen: Kitchen, steps: list[PDDLPlanStep]) -> bool:
