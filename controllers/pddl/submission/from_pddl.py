@@ -15,6 +15,11 @@ food out waits for it to be ready.
 
 from __future__ import annotations
 
+import hashlib
+import pickle
+import tempfile
+from pathlib import Path
+
 from controllers.pddl.interfaces import FromPDDL, PDDLPlanStep
 from simulator.entities.plate import PLATE_NAME
 from simulator.environment import Environment
@@ -54,9 +59,15 @@ class DefaultFromPDDL(FromPDDL):
         """
         kitchen = Kitchen(self._environment)
         left_out = _orders_left_out(kitchen, steps)
+        cache_key = None if quick else _cache_key(self._environment, steps)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            key, chosen = cached
+            return key, self.translate_all(kitchen, chosen, left_out)
         best: tuple | None = None
-        seen: list[list] = []
         options_list = [Options()] if quick else candidate_options(kitchen, steps)
+        best_steps: list[PDDLPlanStep] = steps
+        seen: list[list] = []
         for options in options_list:
             if options is None:
                 chosen = steps  # the planner's own assignment
@@ -69,7 +80,11 @@ class DefaultFromPDDL(FromPDDL):
             outcome = simulate(self._environment, plan)
             if best is None or outcome.key() > best[0]:
                 best = (outcome.key(), plan)
-        return best if best is not None else ((), [])
+                best_steps = chosen
+        if best is None:
+            return ((), [])
+        _cache_put(cache_key, (best[0], best_steps))
+        return best
 
     def translate_all(
         self, kitchen: Kitchen, steps: list[PDDLPlanStep], left_out: bool
@@ -83,14 +98,50 @@ class DefaultFromPDDL(FromPDDL):
         return plan
 
 
+# The problem generator already tries plans out to choose between models;
+# the plan it picks is tried again here in another worker process. A small
+# disk cache, keyed by the kitchen and the plan, saves doing it twice.
+_CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
+
+
+def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
+    try:
+        text = environment.model_dump_json() + repr(steps)
+        return hashlib.sha256(text.encode()).hexdigest()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _cache_get(key: str | None):
+    if key is None:
+        return None
+    try:
+        with open(_CACHE_DIR / key, "rb") as handle:
+            return pickle.load(handle)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _cache_put(key: str | None, value) -> None:
+    if key is None:
+        return
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_DIR / key, "wb") as handle:
+            pickle.dump(value, handle)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
     """Ways of handing out the plan's jobs, to be compared by rollout.
 
     ``None`` stands for the planner's own choice of chefs.
     """
-    yield Options()
-    yield Options(move_stations=False)
-    yield Options(split_cooks=False)
+    for move in ("any", "off"):
+        for split in (True, False):
+            yield Options(move_stations=move, split_cooks=split, split_plates=split)
+    yield Options(move_stations="any", split_cooks=True, split_plates=False)
     yield None
     chefs = [chef_symbol(a.id) for a in kitchen.chefs]
     if len(chefs) >= 3:

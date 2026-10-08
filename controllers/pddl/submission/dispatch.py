@@ -66,6 +66,8 @@ FILL_STEPS = {"put_in_station", "plate_into_station"}
 EMPTY_STEPS = {
     "take_out", "station_onto_plate", "station_onto_plate_tended", "combine_from_station",
 }
+# Steps that leave the chef holding an empty plate.
+EMPTYING = {"plate_into_station", "plate_add_to_station", "discard_from_plate", "wash"}
 # Steps whose target can be swapped for any tile of the same kind.
 STORAGE_STEPS = {"take_food", "take_food_onto_plate", "take_food_onto_dish"}
 BIN_STEPS = {"discard_food", "discard_from_plate"}
@@ -90,8 +92,13 @@ class Job:
 class Options:
     """Variations of the dispatcher, tried side by side by from_pddl.py."""
 
-    move_stations: bool = True
+    # Moving a station's episode to an identical station: "off", "idle" (only
+    # to stations the plan never uses) or "any" (any that is free then).
+    move_stations: str = "any"
     split_cooks: bool = True
+    split_plates: bool = True
+    # Schedule jobs by their dependencies rather than in plan order.
+    reorder: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
     exclude: frozenset[str] = frozenset()
 
@@ -128,6 +135,8 @@ class _Dispatcher:
         }
         self.reach = {c: kitchen.reach_from(region) for c, region in self.regions.items()}
         self._find_episodes()
+        # Counters lent out for setting plates down: symbol -> index intervals.
+        self.parked: dict[str, list[tuple[float, float]]] = {}
         # Dead-end tiles: one chef waiting in one while another needs it
         # makes the controller's traffic rules give up with a deadlock, so
         # each dead end is given to a single chef.
@@ -162,15 +171,17 @@ class _Dispatcher:
         }
         self.spares: dict[str, list[str]] = {}
         for station in self.k.stations:
-            self.spares[station.symbol] = [] if not self.options.move_stations else [
+            reachers = {c for c in self.chefs if station.location in self.reach[c]}
+            self.spares[station.symbol] = [] if self.options.move_stations == "off" else [
                 other.symbol
                 for other in self.k.stations
                 if other.name == station.name
                 and other.symbol != station.symbol
-                and other.symbol not in used
                 and other.supported
-                and other.entity.held_item_id is None
+                and other.location is not None
+                and (self.options.move_stations == "any" or other.symbol not in used)
                 and other.entity.portable == station.entity.portable
+                and reachers <= {c for c in self.chefs if other.location in self.reach[c]}
             ]
         self.episode_of: dict[int, int] = {}
         self.episode_start: dict[int, float] = {}
@@ -192,13 +203,63 @@ class _Dispatcher:
         for station, episode in open_episode.items():
             for key in [k for k, v in self.episode_of.items() if v == episode]:
                 del self.episode_of[key]
+        # When each station is in use, as plan-index intervals. A station
+        # holding food at the start is busy until that food is taken out.
+        self.episode_end: dict[int, int] = {}
+        for index, step in enumerate(self.steps):
+            episode = self.episode_of.get(id(step))
+            if episode is not None:
+                self.episode_end[episode] = index
+        self.busy: dict[str, list[tuple[float, float]]] = {}
+        for episode, end in self.episode_end.items():
+            station = _station_of(self.steps[episode])
+            self.busy.setdefault(station, []).append((episode, end))
+        for station in self.k.stations:
+            if station.entity.held_item_id is not None:
+                first_empty = next(
+                    (
+                        i
+                        for i, step in enumerate(self.steps)
+                        if _station_of(step) == station.symbol and step.name in EMPTY_STEPS
+                    ),
+                    float("inf"),
+                )
+                self.busy.setdefault(station.symbol, []).append((-1, first_empty))
 
     # --- Cutting the plan into jobs ---------------------------------------------
+
+    def _park_spot(self, near: Location | None, start: float, end: float) -> str | None:
+        """A free counter the plan never uses, near ``near``, to leave a plate on.
+
+        It is reserved between plan indices ``start`` and ``end``.
+        """
+        if near is None:
+            return None
+        used = {p for step in self.steps for p in step.parameters if p.startswith("loc_")}
+        options = []
+        for loc, counter in self.k.counters.items():
+            sym = loc_symbol(loc)
+            if sym in used or not counter.empty(self.k.environment):
+                continue
+            if any(a <= end and start <= b for a, b in self.parked.get(sym, [])):
+                continue
+            dist = self.k.distances.get(near, {})
+            best = min((dist[t] for t in _neighbours(loc) if t in dist), default=None)
+            if best is not None:
+                options.append((best, sym))
+        if not options:
+            return None
+        _, sym = min(options)
+        self.parked.setdefault(sym, []).append((start, end))
+        return sym
+
 
     def jobs(self) -> list[Job | tuple[int, PDDLPlanStep]]:
         """Jobs in plan order; chefless steps (cooking by itself) stay as they are."""
         out: list[Job | tuple[int, PDDLPlanStep]] = []
         open_jobs: dict[str, Job] = {}
+        # Chefs left holding an empty plate, and where they emptied it.
+        emptied: dict[str, Location] = {}
         for c, chef in self.chefs.items():
             if chef.held_item_id is not None:
                 job = Job(chef=c, pinned=True)
@@ -220,9 +281,23 @@ class _Dispatcher:
                 out.append(job)
                 if step.name in BEGIN:
                     open_jobs[c] = job
+            if c in emptied and job is open_jobs.get(c) and job.steps:
+                # The chef has carried an empty plate since its last step:
+                # set it down nearby so someone else can take over from here.
+                spot = self._park_spot(emptied[c], job.steps[-1][0], index)
+                if spot is not None:
+                    job.steps.append(
+                        (job.steps[-1][0] + 0.3, PDDLPlanStep("put_down", (c, spot, "p_empty")))
+                    )
+                    job = Job(chef=c, steps=[(index - 0.3, PDDLPlanStep("pick_up", (c, spot, "p_empty")))])
+                    out.append(job)
+                    open_jobs[c] = job
+            emptied.pop(c, None)
             job.steps.append((index, step))
             if step.name in END:
                 open_jobs.pop(c, None)
+            elif step.name in EMPTYING and self.options.split_plates:
+                emptied[c] = _target(step)
         out = [j for j in out if not isinstance(j, Job) or j.steps]
         return self._pair_burnable(out)
 
@@ -303,6 +378,8 @@ class _Dispatcher:
         hands_full = {c for c, chef in self.chefs.items() if chef.held_item_id is not None}
         result: list[tuple[int, PDDLPlanStep]] = []
 
+        if self.options.reorder:
+            return self._run_reordered()
         for item in self.jobs():
             if not isinstance(item, Job):
                 index, step = item
@@ -333,8 +410,11 @@ class _Dispatcher:
                 if best is None or key < best[0]:
                     best = (key, c, trial)
             if best is None:
-                # Nobody else fits; leave the job as planned.
-                result.extend(job.steps)
+                # Nobody else fits; leave the job as planned (on whichever
+                # stations its episodes were moved to).
+                result.extend(
+                    (i, self._on_moved(step)) for i, step in job.steps
+                )
                 self.committed.update(id(step) for _, step in job.steps)
                 if job.chef in last_index:
                     last_index[job.chef] = max(last_index[job.chef], job.steps[-1][0])
@@ -344,8 +424,11 @@ class _Dispatcher:
             self.committed.update(id(step) for _, step in job.steps)
             for episode, station in moves.items():
                 self.moved[episode] = station
-                if station != _station_of(self.steps[episode]):
-                    self.spare_until[station] = self._end_of_episode(episode)
+                original = _station_of(self.steps[episode])
+                if station != original:
+                    interval = (episode, self.episode_end[episode])
+                    self.busy[original].remove(interval)
+                    self.busy.setdefault(station, []).append(interval)
             if DEBUG:
                 print(f"{c:12s} {free[c]:6.1f}->{finish:6.1f} "
                       + "; ".join(f"{i}:{st.name} {' '.join(st.parameters[1:])}" for i, st in new_steps))
@@ -364,6 +447,100 @@ class _Dispatcher:
 
         result.sort(key=lambda pair: pair[0])
         return [step for _, step in result]
+
+    def _run_reordered(self) -> list[PDDLPlanStep]:
+        """List scheduling: any job whose predecessors are scheduled may go next.
+
+        Job B must follow job A only if A uses a counter, station, dispenser
+        or the delivery before B does in the plan; otherwise the plan's order
+        between them is arbitrary. Among the jobs free to go, the one that
+        can finish soonest (on the chef finishing it soonest) goes first, so
+        a bottleneck station is refilled as soon as it is free.
+        """
+        items = self.jobs()
+        jobs = [j for j in items if isinstance(j, Job)]
+        loose = [j for j in items if not isinstance(j, Job)]
+        uses: dict[int, dict[object, list[float]]] = {}
+        for job in jobs:
+            touched: dict[object, list[float]] = {}
+            for index, step in job.steps:
+                target = _target(step)
+                if target is None:
+                    continue
+                key = self._resource(step, target)
+                if key is not None:
+                    touched.setdefault(key, []).append(index)
+            uses[id(job)] = touched
+        deps: dict[int, set[int]] = {id(j): set() for j in jobs}
+        for a in jobs:
+            for b in jobs:
+                if a is b:
+                    continue
+                ua, ub = uses[id(a)], uses[id(b)]
+                if any(min(ua[k]) < max(ub[k]) and min(ua[k]) < min(ub[k])
+                       for k in ua.keys() & ub.keys()):
+                    deps[id(b)].add(id(a))
+        for job in jobs:  # a chef's pinned job comes first
+            if job.pinned:
+                for other in jobs:
+                    if other is not job and other.chef == job.chef:
+                        deps[id(other)].add(id(job))
+
+        free = {c: 0.0 for c in self.chefs}
+        pos = {c: (chef.x, chef.y) for c, chef in self.chefs.items()}
+        at_target: dict[str, Location | None] = {c: None for c in self.chefs}
+        ready: dict[object, list[tuple[float, float]]] = {}
+        hands_full = {c for c, chef in self.chefs.items() if chef.held_item_id is not None}
+        done: set[int] = set()
+        pending = list(jobs)
+        result: list[tuple[tuple, PDDLPlanStep]] = []
+        seq = 0
+        while pending:
+            free_to_go = [j for j in pending if deps[id(j)] <= done]
+            if not free_to_go:
+                free_to_go = [min(pending, key=lambda j: j.steps[0][0])]
+            best = None
+            for job in free_to_go:
+                if job.pinned:
+                    candidates = [job.chef]
+                elif job.hands_free:
+                    candidates = list(self.chefs)
+                else:
+                    candidates = [c for c in self.chefs if c not in hands_full]
+                for c in candidates:
+                    trial = self._simulate(job, c, free[c], pos[c], at_target[c], ready)
+                    if trial is None:
+                        continue
+                    key = (trial[0], job.steps[0][0], c != job.chef)
+                    if best is None or key < best[0]:
+                        best = (key, job, c, trial)
+            if best is None:
+                # Nobody can take any of them: fall back to the plan's order.
+                return self._fallback_order(jobs, loose)
+            _, job, c, (finish, new_steps, last_target, touched, moves, pockets) = best
+            pending.remove(job)
+            done.add(id(job))
+            self.pocket_owner.update(pockets)
+            start = free[c]
+            for _, step in new_steps:
+                result.append(((start, seq), step))
+                seq += 1
+            free[c] = finish
+            if not job.hands_free:
+                if job.steps[-1][1].name in END:
+                    hands_full.discard(c)
+                else:
+                    hands_full.add(c)
+            at_target[c] = last_target
+            for key, used in touched.items():
+                ready.setdefault(key, []).extend(used)
+        result.sort(key=lambda pair: pair[0])
+        return [step for _, step in result]
+
+    def _fallback_order(self, jobs, loose) -> list[PDDLPlanStep]:
+        pairs = [pair for job in jobs for pair in job.steps] + list(loose)
+        pairs.sort(key=lambda pair: pair[0])
+        return [step for _, step in pairs]
 
     def _simulate(self, job: Job, c: str, time: float, start: Location,
                   at: Location | None, ready: dict[object, list[tuple[float, float]]]):
@@ -433,11 +610,14 @@ class _Dispatcher:
             if self.episode_of.get(id(other)) == episode
         ):
             original = _station_of(step)
+            start, end = episode, self.episode_end[episode]
             options = [original] + [
                 spare
                 for spare in self.spares.get(original, [])
-                if self.spare_until.get(spare, -1) < index
-                and self.k.station_by_symbol[spare].location in self.reach[c]
+                if self.k.station_by_symbol[spare].location in self.reach[c]
+                and not any(
+                    a <= end and start <= b for a, b in self.busy.get(spare, [])
+                )
             ]
             target = min(
                 options,
@@ -450,6 +630,14 @@ class _Dispatcher:
         if target is None or target == _station_of(step):
             return step
         return _on_station(step, target, self.k)
+
+    def _on_moved(self, step: PDDLPlanStep) -> PDDLPlanStep:
+        episode = self.episode_of.get(id(step))
+        if episode is None or episode not in self.moved:
+            return step
+        if self.moved[episode] == _station_of(step):
+            return step
+        return _on_station(step, self.moved[episode], self.k)
 
     def _end_of_episode(self, episode: int) -> float:
         return max(

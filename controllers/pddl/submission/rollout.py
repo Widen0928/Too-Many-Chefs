@@ -32,11 +32,16 @@ class Outcome:
     delivered: int
     points: int
     expired: int
+    # Reward of the orders that expired: points the run can no longer earn.
+    lost: int
+    # Whether the plan ran to its end (rather than getting stuck on the way).
+    finished: bool
     ticks: int
 
     def key(self) -> tuple:
-        """Bigger is better: no crash, then orders, points, then speed."""
-        return (not self.crashed, self.delivered, self.points, -self.expired, -self.ticks)
+        """Bigger is better: no crash, then points earned minus points lost,
+        then finishing the plan, then speed."""
+        return (not self.crashed, self.points - self.lost, self.finished, -self.ticks)
 
 
 def simulate(
@@ -65,9 +70,11 @@ def simulate(
     context = Context()
     env = environment
     crashed = False
+    finished = False
     for _ in range(max_ticks):
         state = _state(env)
         if not state.visible_orders and not state.order_queue.pending:
+            finished = True
             break
         try:
             # With no actions, the controller simply asks again without time
@@ -81,16 +88,22 @@ def simulate(
             break
         if not actions:
             if all(not queue for queue in plans.values()):
+                finished = True
                 break
             if not env.has_pending_effects():
                 break  # Stuck: the real controller would replan here.
         env = env.step(actions)
     end = _state(env)
+    expired = end.order_queue.expired_count - start.order_queue.expired_count
+    entries = [*start.order_queue.visible, *start.order_queue.pending]
+    reward = sum(e.reward for e in entries) / len(entries) if entries else 0
     return Outcome(
         crashed=crashed,
         delivered=end.order_queue.delivered_count - start.order_queue.delivered_count,
         points=end.score - start.score,
-        expired=end.order_queue.expired_count - start.order_queue.expired_count,
+        expired=expired,
+        lost=int(expired * reward),
+        finished=finished,
         ticks=env.timestep - environment.timestep,
     )
 

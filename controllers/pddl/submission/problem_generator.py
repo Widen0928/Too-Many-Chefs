@@ -74,18 +74,21 @@ class DefaultProblemGenerator(ProblemGenerator):
             # Two models: one that keeps every tip, and one allowed quicker
             # but tip-losing moves. Each is planned and tried out, and the
             # one that earns more (orders first, then tips, then speed) wins.
-            for fast in (False, True):
+            for fast in (True, False):
                 problem = PDDLProblem(
                     domain=domain, problem=build_problem(kitchen, entries, fast=fast)
                 )
                 last = last or problem
-                steps = probe(problem, seconds)
+                # The tip-keeping model is much harder to plan in divided
+                # kitchens, so it only gets a short try.
+                limit = seconds if fast else min(seconds, TIP_SAFE_SECONDS)
+                steps = probe(problem, limit)
                 if steps is None:
                     continue
                 if not steps:
                     continue
                 score = evaluate(environment, steps)
-                if best is None or score > best[0]:
+                if best is None or score >= best[0]:
                     best = (score, problem)
             if best is not None:
                 return best[1]
@@ -223,6 +226,7 @@ def kitchen_signature(environment: Environment) -> tuple:
 # Planning time allowed for checking each goal set, in seconds.
 FIRST_PROBE_SECONDS = 10.0
 LATER_PROBE_SECONDS = 4.0
+TIP_SAFE_SECONDS = 3.0
 
 
 def goal_sets(kitchen: Kitchen, horizon: int | None = None):
