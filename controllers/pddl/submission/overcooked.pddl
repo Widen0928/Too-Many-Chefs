@@ -102,9 +102,11 @@
   )
 
   ; Take an ingredient straight onto the plate the chef is holding.
+  ; Only onto an empty plate: a dish built straight from a storage onto a
+  ; plate is not credited as prepared, which loses its tip.
   (:action take_food_onto_plate
     :parameters (?c - chef ?l - loc ?f - food ?p - pstate ?q - pstate)
-    :precondition (and (reach ?c ?l) (holds ?c ?p) (storage ?l ?f)
+    :precondition (and (reach ?c ?l) (holds ?c ?p) (empty_plate ?p) (storage ?l ?f)
                        (plating ?p ?f ?q))
     :effect (and (holds ?c ?q) (not (holds ?c ?p)))
   )
