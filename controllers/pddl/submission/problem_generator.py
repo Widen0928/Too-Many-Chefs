@@ -68,10 +68,27 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         for entries, seconds in goal_sets(kitchen, self.horizon):
-            problem = PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
-            last = last or problem
-            if not entries or probe(problem, seconds):
-                return problem
+            if not entries:
+                return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
+            best: tuple | None = None
+            # Two models: one that keeps every tip, and one allowed quicker
+            # but tip-losing moves. Each is planned and tried out, and the
+            # one that earns more (orders first, then tips, then speed) wins.
+            for fast in (False, True):
+                problem = PDDLProblem(
+                    domain=domain, problem=build_problem(kitchen, entries, fast=fast)
+                )
+                last = last or problem
+                steps = probe(problem, seconds)
+                if steps is None:
+                    continue
+                if not steps:
+                    continue
+                score = evaluate(environment, steps)
+                if best is None or score > best[0]:
+                    best = (score, problem)
+            if best is not None:
+                return best[1]
         return last or PDDLProblem(domain=domain, problem=build_problem(kitchen, []))
 
     def should_replan(self, environment: Environment) -> bool:
@@ -169,8 +186,9 @@ def _sub_multiset(small: list[str], big: list[str]) -> bool:
 
 
 def count_waste(environment: Environment, state: OvercookedState) -> int:
-    """Food that no visible order can use, such as burnt meat or garbage."""
-    useful = set(state.visible_orders)
+    """Food that no order, shown or still to come, can use: burnt meat,
+    garbage. Food prepared early for a ticket not yet shown is not waste."""
+    useful = set(state.visible_orders) | {e.name for e in state.order_queue.pending}
     frontier = list(useful)
     while frontier:
         food = frontier.pop()
@@ -232,25 +250,39 @@ def goal_sets(kitchen: Kitchen, horizon: int | None = None):
         yield [], seconds
 
 
-def probe(problem: PDDLProblem, seconds: float) -> bool:
-    """Whether the planner finds a plan for ``problem`` within ``seconds``.
+def probe(problem: PDDLProblem, seconds: float) -> list | None:
+    """The plan the planner finds for ``problem`` within ``seconds``.
 
-    The controller solves the chosen problem again afterwards; the search is
-    deterministic, so it finds the same plan.
+    An empty list means no plan; None means the planner could not be run,
+    which the controller will report itself. The controller solves the
+    chosen problem again afterwards; the search is deterministic, so it
+    finds the same plan.
     """
     from controllers.pddl.solvers import solve_problem_with_logging
 
     try:
-        return bool(solve_problem_with_logging(problem, time_limit_seconds=seconds))
-    except Exception:  # noqa: BLE001 - an unusable planner: let the controller report it
-        return True
+        return solve_problem_with_logging(problem, time_limit_seconds=seconds)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def evaluate(environment: Environment, steps: list) -> tuple:
+    """Best rollout score of a plan over the dispatch variants (rollout.py)."""
+    from .from_pddl import DefaultFromPDDL
+
+    try:
+        return DefaultFromPDDL(environment).best(steps)[0]
+    except Exception:  # noqa: BLE001 - never let scoring stop planning
+        return ()
 
 
 def build_domain() -> str:
     return DOMAIN_PATH.read_text(encoding="utf-8")
 
 
-def build_problem(kitchen: Kitchen, entries: list | None = None) -> str:
+def build_problem(
+    kitchen: Kitchen, entries: list | None = None, fast: bool = False
+) -> str:
     problem = ProblemBuilder(domain_name="overcooked", problem_name="kitchen")
     describe_food_and_plates(kitchen, problem)
     describe_locations(kitchen, problem)
@@ -261,6 +293,8 @@ def build_problem(kitchen: Kitchen, entries: list | None = None) -> str:
     if entries is None:
         entries = feasible_orders(kitchen, queued_orders(kitchen))
     describe_orders(kitchen, problem, entries)
+    if fast:
+        problem.add_fact("(fast_plating)")
     return problem.to_pddl()
 
 

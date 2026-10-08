@@ -70,7 +70,12 @@ def simulate(
         if not state.visible_orders and not state.order_queue.pending:
             break
         try:
-            actions, plans = policy.get_mutations(plans, env, context)
+            # With no actions, the controller simply asks again without time
+            # passing; the policy's path cache sometimes needs that retry.
+            for _attempt in range(3):
+                actions, plans = policy.get_mutations(plans, env, context)
+                if actions:
+                    break
         except AgentDeadlockError:
             crashed = True
             break

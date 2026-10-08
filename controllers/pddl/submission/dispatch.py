@@ -67,7 +67,7 @@ EMPTY_STEPS = {
     "take_out", "station_onto_plate", "station_onto_plate_tended", "combine_from_station",
 }
 # Steps whose target can be swapped for any tile of the same kind.
-STORAGE_STEPS = {"take_food", "take_food_onto_plate"}
+STORAGE_STEPS = {"take_food", "take_food_onto_plate", "take_food_onto_dish"}
 BIN_STEPS = {"discard_food", "discard_from_plate"}
 SINK_STEPS = {"wash"}
 DELIVERY_STEPS = {"deliver", "deliver_return_clean", "deliver_return_dirty"}

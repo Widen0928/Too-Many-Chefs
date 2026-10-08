@@ -75,6 +75,7 @@
     (empty_plate ?p - pstate)
     (dirty_plate ?p - pstate)
     (dispenser ?l - loc)
+    (fast_plating)
     (infinite_dispenser ?l - loc)
     (clean_n ?l - loc ?n - count)
     (dirty_n ?l - loc ?n - count)
@@ -107,6 +108,17 @@
   (:action take_food_onto_plate
     :parameters (?c - chef ?l - loc ?f - food ?p - pstate ?q - pstate)
     :precondition (and (reach ?c ?l) (holds ?c ?p) (empty_plate ?p) (storage ?l ?f)
+                       (plating ?p ?f ?q))
+    :effect (and (holds ?c ?q) (not (holds ?c ?p)))
+  )
+
+  ; Add an ingredient from a storage straight to the dish on the held plate.
+  ; Quicker, but the simulator does not credit the new dish as prepared, so
+  ; its tip is lost; the problem allows it (fast_plating) only when time
+  ; matters more than tips.
+  (:action take_food_onto_dish
+    :parameters (?c - chef ?l - loc ?f - food ?p - pstate ?q - pstate)
+    :precondition (and (reach ?c ?l) (holds ?c ?p) (fast_plating) (storage ?l ?f)
                        (plating ?p ?f ?q))
     :effect (and (holds ?c ?q) (not (holds ?c ?p)))
   )

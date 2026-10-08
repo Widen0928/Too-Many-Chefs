@@ -43,11 +43,21 @@ class DefaultFromPDDL(FromPDDL):
         self._environment = environment
 
     def from_pddl(self, steps: list[PDDLPlanStep]) -> list[MutationWithLocation]:
+        return self.best(steps)[1]
+
+    def best(
+        self, steps: list[PDDLPlanStep], quick: bool = False
+    ) -> tuple[tuple, list[MutationWithLocation]]:
+        """The best way found to carry out ``steps``, and its rollout score.
+
+        ``quick`` tries only the default dispatch.
+        """
         kitchen = Kitchen(self._environment)
         left_out = _orders_left_out(kitchen, steps)
         best: tuple | None = None
         seen: list[list] = []
-        for options in candidate_options(kitchen, steps):
+        options_list = [Options()] if quick else candidate_options(kitchen, steps)
+        for options in options_list:
             if options is None:
                 chosen = steps  # the planner's own assignment
             else:
@@ -59,7 +69,7 @@ class DefaultFromPDDL(FromPDDL):
             outcome = simulate(self._environment, plan)
             if best is None or outcome.key() > best[0]:
                 best = (outcome.key(), plan)
-        return best[1] if best is not None else []
+        return best if best is not None else ((), [])
 
     def translate_all(
         self, kitchen: Kitchen, steps: list[PDDLPlanStep], left_out: bool
@@ -169,6 +179,8 @@ class _Translator:
             ),
             loc,
         )
+
+    _take_food_onto_dish = _take_food_onto_plate
 
     def _take_plate_infinite(self, chef: str, loc: str, p: str):
         return self.at(TakeFromStorage(agent_id=chef), loc)
