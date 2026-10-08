@@ -57,6 +57,8 @@ class DefaultProblemGenerator(ProblemGenerator):
         # Orders a plan may cover (None: all). Set before replanning when the
         # chefs keep getting stuck; the planning worker gets a copy.
         self.horizon: int | None = None
+        # Set by strategy.py while playing a level out.
+        self.forced_horizon = "auto"
         self._stuck_count = 0
         self._stuck_signature: tuple | None = None
 
@@ -68,7 +70,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         kitchen = Kitchen(environment, controlled_agent_ids)
         domain = build_domain()
         last: PDDLProblem | None = None
-        horizon = self.horizon or CONFIG.horizon
+        horizon = self.horizon or self._strategy_horizon(environment)
         for entries, seconds in goal_sets(kitchen, horizon):
             if not entries:
                 return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
@@ -98,6 +100,21 @@ class DefaultProblemGenerator(ProblemGenerator):
             if best is not None:
                 return best[1]
         return last or PDDLProblem(domain=domain, problem=build_problem(kitchen, []))
+
+    def _strategy_horizon(self, environment: Environment):
+        """The planning horizon: fixed while playing a level out, otherwise
+        chosen once per level by playing it out under each option."""
+        if self.forced_horizon != "auto":
+            return self.forced_horizon
+        options = list(CONFIG.select_horizons)
+        if len(options) < 2:
+            return CONFIG.horizon
+        from .strategy import choose_horizon
+
+        try:
+            return choose_horizon(environment, options)
+        except Exception:  # noqa: BLE001
+            return CONFIG.horizon
 
     def should_replan(self, environment: Environment) -> bool:
         state = environment.get_first_entity_of_type(OvercookedState)
@@ -268,12 +285,32 @@ def probe(problem: PDDLProblem, seconds: float) -> list | None:
     chosen problem again afterwards; the search is deterministic, so it
     finds the same plan.
     """
+    import hashlib
+    import pickle
+    import tempfile
+
     from controllers.pddl.solvers import solve_problem_with_logging
 
+    # Playing a level out (strategy.py) and then running it for real meets
+    # the same problems again, so plans are kept on disk.
+    cache = Path(tempfile.gettempdir()) / "too-many-chefs-plans"
+    key = hashlib.sha256(
+        (problem.domain + problem.problem + str(seconds)).encode()
+    ).hexdigest()
     try:
-        return solve_problem_with_logging(problem, time_limit_seconds=seconds)
+        return pickle.loads((cache / key).read_bytes())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        steps = solve_problem_with_logging(problem, time_limit_seconds=seconds)
     except Exception:  # noqa: BLE001
         return None
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / key).write_bytes(pickle.dumps(steps))
+    except Exception:  # noqa: BLE001
+        pass
+    return steps
 
 
 def evaluate(environment: Environment, steps: list) -> tuple:

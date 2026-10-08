@@ -28,6 +28,9 @@ class Config:
     models: str = "both"
     # Seconds the tip-keeping model gets.
     tip_safe_seconds: float = 6.0
+    # Horizons to choose between per level by playing the level out at the
+    # start (strategy.py); empty to always use ``horizon``.
+    select_horizons: tuple = (3, 2, None, 4)
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
 
@@ -40,6 +43,7 @@ def load() -> Config:
     try:
         values = json.loads(raw)
         known = {f.name for f in fields(Config)}
+        values = {k: tuple(v) if isinstance(v, list) else v for k, v in values.items()}
         return replace(config, **{k: v for k, v in values.items() if k in known})
     except Exception:  # noqa: BLE001 - a bad override must not break a run
         return config

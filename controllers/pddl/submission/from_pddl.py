@@ -107,10 +107,48 @@ _CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
 
 def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
     try:
-        text = environment.model_dump_json() + repr(steps) + repr(CONFIG)
+        text = canonical(environment) + repr(steps) + repr(CONFIG)
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
         return None
+
+
+def canonical(environment: Environment) -> str:
+    """The kitchen's state without entity ids, which are random for food
+    created during a run (so a played-out run and the real one match)."""
+    from simulator.entities import Entity, OvercookedState
+
+    def describe(entity_id: str | None, depth: int = 0) -> str:
+        if entity_id is None or depth > 3:
+            return "-"
+        entity = environment.get_entity(entity_id)
+        if entity is None:
+            return "?"
+        held = getattr(entity, "held_item_id", None)
+        return f"{getattr(entity, 'name', '')}/{getattr(entity, 'dirty', '')}[{describe(held, depth + 1)}]"
+
+    rows = []
+    for entity in environment.get_entities_of_type(Entity):
+        if isinstance(entity, OvercookedState):
+            queue = entity.order_queue
+            rows.append(
+                f"Q{[(e.name, e.revealed_at, e.time_limit, e.reward) for e in queue.visible]}"
+                f"{[(e.name, e.time_limit) for e in queue.pending]}"
+                f"{queue.delivered_count},{queue.expired_count},{entity.score}"
+            )
+            continue
+        x, y = getattr(entity, "x", None), getattr(entity, "y", None)
+        if x is None:
+            continue
+        cooking = getattr(entity, "cooking", None)
+        rows.append(
+            f"{type(entity).__name__}@{x},{y}:{getattr(entity, 'name', '')}"
+            f":{getattr(entity, 'orientation', '')}:{describe(getattr(entity, 'held_item_id', None))}"
+            f":{cooking.elapsed if cooking else ''}"
+            f":{getattr(entity, 'plate_count', '')},{getattr(entity, 'dirty_plate_count', '')}"
+            f":{getattr(entity, 'id', '') if type(entity).__name__ == 'Agent' else ''}"
+        )
+    return f"t{environment.timestep}|" + "|".join(sorted(rows))
 
 
 def _cache_get(key: str | None):
