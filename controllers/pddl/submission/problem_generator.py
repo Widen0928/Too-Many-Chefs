@@ -58,7 +58,14 @@ class DefaultProblemGenerator(ProblemGenerator):
         controlled_agent_ids: Collection[str] | None = None,
     ) -> PDDLProblem:
         kitchen = Kitchen(environment, controlled_agent_ids)
-        return PDDLProblem(domain=build_domain(), problem=build_problem(kitchen))
+        domain = build_domain()
+        last: PDDLProblem | None = None
+        for entries, seconds in goal_sets(kitchen):
+            problem = PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
+            last = last or problem
+            if not entries or probe(problem, seconds):
+                return problem
+        return last or PDDLProblem(domain=domain, problem=build_problem(kitchen, []))
 
     def should_replan(self, environment: Environment) -> bool:
         state = environment.get_first_entity_of_type(OvercookedState)
@@ -164,11 +171,55 @@ def kitchen_signature(environment: Environment) -> tuple:
     return tuple(sorted(items, key=str))
 
 
+# Planning time allowed for checking each goal set, in seconds.
+FIRST_PROBE_SECONDS = 10.0
+LATER_PROBE_SECONDS = 4.0
+
+
+def goal_sets(kitchen: Kitchen):
+    """Goal sets to try, best first, each with a time limit for checking it.
+
+    A problem with an unreachable goal gives no plan at all and the chefs
+    stand still. So the orders that look feasible are tried first, then the
+    same queue with the last order dropped, one at a time, and finally each
+    order on its own, without the feasibility check in case it was wrong.
+    """
+    queue = queued_orders(kitchen)
+    feasible = feasible_orders(kitchen, queue)
+    tried: list[list] = []
+    seconds = FIRST_PROBE_SECONDS
+    candidates = [feasible[:n] for n in range(len(feasible), 0, -1)]
+    candidates += [[entry] for entry in queue]
+    for entries in candidates:
+        key = [id(e) for e in entries]
+        if key in tried:
+            continue
+        tried.append(key)
+        yield entries, seconds
+        seconds = LATER_PROBE_SECONDS
+    if not candidates:
+        yield [], seconds
+
+
+def probe(problem: PDDLProblem, seconds: float) -> bool:
+    """Whether the planner finds a plan for ``problem`` within ``seconds``.
+
+    The controller solves the chosen problem again afterwards; the search is
+    deterministic, so it finds the same plan.
+    """
+    from controllers.pddl.solvers import solve_problem_with_logging
+
+    try:
+        return bool(solve_problem_with_logging(problem, time_limit_seconds=seconds))
+    except Exception:  # noqa: BLE001 - an unusable planner: let the controller report it
+        return True
+
+
 def build_domain() -> str:
     return DOMAIN_PATH.read_text(encoding="utf-8")
 
 
-def build_problem(kitchen: Kitchen) -> str:
+def build_problem(kitchen: Kitchen, entries: list | None = None) -> str:
     problem = ProblemBuilder(domain_name="overcooked", problem_name="kitchen")
     describe_food_and_plates(kitchen, problem)
     describe_locations(kitchen, problem)
@@ -176,7 +227,9 @@ def build_problem(kitchen: Kitchen) -> str:
     describe_counters(kitchen, problem)
     describe_stations(kitchen, problem)
     describe_dispensers(kitchen, problem)
-    describe_orders(kitchen, problem)
+    if entries is None:
+        entries = feasible_orders(kitchen, queued_orders(kitchen))
+    describe_orders(kitchen, problem, entries)
     return problem.to_pddl()
 
 
@@ -401,8 +454,8 @@ def describe_dispensers(kitchen: Kitchen, problem: ProblemBuilder) -> None:
 # --- Orders --------------------------------------------------------------------
 
 
-def describe_orders(kitchen: Kitchen, problem: ProblemBuilder) -> None:
-    """One order object per visible order, each with a goal to serve it.
+def queued_orders(kitchen: Kitchen) -> list:
+    """The orders to plan for, in the order they will be served.
 
     Orders are always served one after another: only the first is open and
     serving it opens the next. When the kitchen lets orders be served in any
@@ -435,7 +488,12 @@ def describe_orders(kitchen: Kitchen, problem: ProblemBuilder) -> None:
                 float("inf") if e.time_limit is None else e.revealed_at + e.time_limit
             )
         )
-    entries = feasible_orders(kitchen, entries)
+    return entries
+
+
+def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list) -> None:
+    """One order object per planned order, each with a goal to serve it;
+    serving one opens the next (see ``queued_orders``)."""
     end = problem.add_object("o_end", "order")
     previous: str | None = None
     for index, entry in enumerate(entries):

@@ -56,6 +56,13 @@ END = {
     "set_station_on_support",
     "set_station_on_counter",
 }
+# Steps that act on a station: (station parameter, location parameter).
+STATION_STEPS = {
+    "put_in_station", "add_to_station", "combine_from_station", "take_out", "cook",
+    "station_onto_plate", "plate_into_station", "plate_add_to_station",
+}
+FILL_STEPS = {"put_in_station", "plate_into_station"}
+EMPTY_STEPS = {"take_out", "station_onto_plate", "combine_from_station"}
 # Steps whose target can be swapped for any tile of the same kind.
 STORAGE_STEPS = {"take_food", "take_food_onto_plate"}
 BIN_STEPS = {"discard_food", "discard_from_plate"}
@@ -105,6 +112,71 @@ class _Dispatcher:
             }
             for c, region in self.regions.items()
         }
+        self._find_episodes()
+        # Dead-end tiles: one chef waiting in one while another needs it
+        # makes the controller's traffic rules give up with a deadlock, so
+        # each dead end is given to a single chef.
+        self.pocket_owner: dict[Location, str] = {}
+        for c, chef in self.chefs.items():
+            tile = (chef.x, chef.y)
+            if self._dead_end(tile):
+                self.pocket_owner[tile] = c
+        # Episode -> station symbol it was moved to.
+        self.moved: dict[int, str] = {}
+        # Spare station -> plan index of the last step of the last episode moved there.
+        self.spare_until: dict[str, float] = {}
+        # Steps already given to a chef; an episode can only move before any
+        # of its steps has been.
+        self.committed: set[int] = set()
+
+    # --- Station episodes -----------------------------------------------------
+
+    def _find_episodes(self) -> None:
+        """Group the steps that use a station from filling it to emptying it.
+
+        The planner often sends every dish through one station while an
+        identical one stands idle. A whole episode (put the rice in the pot,
+        cook it, take it out) can move to an idle twin, which spreads chefs
+        out and lets dishes cook side by side.
+        """
+        used = {
+            sym
+            for step in self.steps
+            for sym in step.parameters
+            if sym in self.k.station_by_symbol
+        }
+        self.spares: dict[str, list[str]] = {}
+        for station in self.k.stations:
+            self.spares[station.symbol] = [
+                other.symbol
+                for other in self.k.stations
+                if other.name == station.name
+                and other.symbol != station.symbol
+                and other.symbol not in used
+                and other.supported
+                and other.entity.held_item_id is None
+                and other.entity.portable == station.entity.portable
+            ]
+        self.episode_of: dict[int, int] = {}
+        self.episode_start: dict[int, float] = {}
+        open_episode: dict[str, int] = {}
+        for index, step in enumerate(self.steps):
+            station = _station_of(step)
+            if station is None:
+                continue
+            if step.name in FILL_STEPS:
+                open_episode[station] = index
+                self.episode_start[index] = index
+            episode = open_episode.get(station)
+            if episode is None:
+                continue
+            self.episode_of[id(step)] = episode
+            if step.name in EMPTY_STEPS:
+                open_episode.pop(station, None)
+        # Episodes still open at the end of the plan stay where they are.
+        for station, episode in open_episode.items():
+            for key in [k for k, v in self.episode_of.items() if v == episode]:
+                del self.episode_of[key]
 
     # --- Cutting the plan into jobs ---------------------------------------------
 
@@ -196,6 +268,9 @@ class _Dispatcher:
             if not isinstance(item, Job):
                 index, step = item
                 # Cooking time was added when the food went in.
+                episode = self.episode_of.get(id(step))
+                if episode is not None and episode in self.moved:
+                    step = _on_station(step, self.moved[episode], self.k)
                 result.append((index, step))
                 continue
             job = item
@@ -215,10 +290,17 @@ class _Dispatcher:
             if best is None:
                 # Nobody else fits; leave the job as planned.
                 result.extend(job.steps)
+                self.committed.update(id(step) for _, step in job.steps)
                 if job.chef in last_index:
                     last_index[job.chef] = max(last_index[job.chef], job.steps[-1][0])
                 continue
-            _, c, (finish, new_steps, last_target, touched) = best
+            _, c, (finish, new_steps, last_target, touched, moves, pockets) = best
+            self.pocket_owner.update(pockets)
+            self.committed.update(id(step) for _, step in job.steps)
+            for episode, station in moves.items():
+                self.moved[episode] = station
+                if station != _station_of(self.steps[episode]):
+                    self.spare_until[station] = self._end_of_episode(episode)
             if DEBUG:
                 print(f"{c:12s} {free[c]:6.1f}->{finish:6.1f} "
                       + "; ".join(f"{i}:{st.name} {' '.join(st.parameters[1:])}" for i, st in new_steps))
@@ -238,12 +320,22 @@ class _Dispatcher:
         reach = self.reach[c]
         new_steps: list[tuple[int, PDDLPlanStep]] = []
         touched: dict[object, float] = {}
+        moves: dict[int, str] = {}
+        pockets: dict[Location, str] = {}
         for index, step in job.steps:
+            step = self._move_station(step, index, c, at, start, moves)
             step = self._retarget(step, c, at, start)
             target = _target(step)
             if target is not None:
                 if target not in reach:
                     return None
+                pocket = self._pocket(c, target)
+                if pocket is not None:
+                    for tile in pocket:
+                        owner = self.pocket_owner.get(tile) or pockets.get(tile)
+                        if owner is not None and owner != c:
+                            return None
+                        pockets[tile] = c
                 time += self._walk(c, at, start, target)
                 key = self._resource(step, target)
                 if key is not None:
@@ -255,7 +347,62 @@ class _Dispatcher:
                 if key is not None:
                     touched[key] = time + self._cook_delay(step)
             new_steps.append((index, _with_chef(step, c)))
-        return time, new_steps, at, touched
+        return time, new_steps, at, touched, moves, pockets
+
+    def _pocket(self, c: str, target: Location) -> frozenset | None:
+        """The dead-end floor tiles chef ``c`` must stand on to use ``target``.
+
+        None unless every tile from which ``c`` can reach the target is a dead
+        end (a floor tile with a single floor neighbour).
+        """
+        region = self.regions[c]
+        tiles = [t for t in _neighbours(target) if t in region]
+        if not tiles:
+            return None
+        if not all(self._dead_end(tile) for tile in tiles):
+            return None
+        return frozenset(tiles)
+
+    def _dead_end(self, tile: Location) -> bool:
+        return sum(1 for n in _neighbours(tile) if n in self.k.walkable) <= 1
+
+    def _move_station(self, step: PDDLPlanStep, index: float, c: str,
+                      at: Location | None, start: Location,
+                      moves: dict[int, str]) -> PDDLPlanStep:
+        episode = self.episode_of.get(id(step))
+        if episode is None:
+            return step
+        target = self.moved.get(episode) or moves.get(episode)
+        if target is None and step.name in FILL_STEPS and not any(
+            id(other) in self.committed
+            for other in self.steps
+            if self.episode_of.get(id(other)) == episode
+        ):
+            original = _station_of(step)
+            options = [original] + [
+                spare
+                for spare in self.spares.get(original, [])
+                if self.spare_until.get(spare, -1) < index
+                and self.k.station_by_symbol[spare].location in self.reach[c]
+            ]
+            target = min(
+                options,
+                key=lambda sym: (
+                    self._walk(c, at, start, self.k.station_by_symbol[sym].location),
+                    sym != original,
+                ),
+            )
+            moves[episode] = target
+        if target is None or target == _station_of(step):
+            return step
+        return _on_station(step, target, self.k)
+
+    def _end_of_episode(self, episode: int) -> float:
+        return max(
+            index
+            for index, step in enumerate(self.steps)
+            if self.episode_of.get(id(step)) == episode
+        )
 
     def _walk(self, c: str, at: Location | None, start: Location, target: Location) -> float:
         region = self.regions[c]
@@ -314,6 +461,24 @@ class _Dispatcher:
             if station is not None and station.entity.cooks_by_itself:
                 return float(station.entity.cook_time)
         return 0.0
+
+def _station_of(step: PDDLPlanStep) -> str | None:
+    if step.name == "cook_by_itself":
+        return step.parameters[0]
+    if step.name in STATION_STEPS:
+        return step.parameters[1]
+    return None
+
+
+def _on_station(step: PDDLPlanStep, station: str, kitchen: Kitchen) -> PDDLPlanStep:
+    params = list(step.parameters)
+    if step.name == "cook_by_itself":
+        params[0] = station
+    else:
+        params[1] = station
+        params[2] = loc_symbol(kitchen.station_by_symbol[station].location)
+    return PDDLPlanStep(step.name, tuple(params))
+
 
 def _has_chef(step: PDDLPlanStep) -> bool:
     return bool(step.parameters) and step.parameters[0].startswith("c_")
