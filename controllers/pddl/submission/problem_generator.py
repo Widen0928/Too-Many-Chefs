@@ -41,6 +41,8 @@ class DefaultProblemGenerator(ProblemGenerator):
     STALL_TICKS = 40
     # Consecutive calls on the same timestep (nobody can act) before replanning.
     FROZEN_CALLS = 3
+    # Replans in a row that make no progress before giving up on replanning.
+    MAX_STUCK_REPLANS = 3
 
     def __init__(self) -> None:
         self._orders: list[str] | None = None
@@ -51,6 +53,11 @@ class DefaultProblemGenerator(ProblemGenerator):
         self._last_timestep: int | None = None
         self._frozen_calls = 0
         self._waste: int | None = None
+        # Orders a plan may cover (None: all). Set before replanning when the
+        # chefs keep getting stuck; the planning worker gets a copy.
+        self.horizon: int | None = None
+        self._stuck_count = 0
+        self._stuck_signature: tuple | None = None
 
     def to_pddl(
         self,
@@ -60,7 +67,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         kitchen = Kitchen(environment, controlled_agent_ids)
         domain = build_domain()
         last: PDDLProblem | None = None
-        for entries, seconds in goal_sets(kitchen):
+        for entries, seconds in goal_sets(kitchen, self.horizon):
             problem = PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
             last = last or problem
             if not entries or probe(problem, seconds):
@@ -98,7 +105,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         if timestep == self._last_timestep:
             self._frozen_calls += 1
             if self._frozen_calls >= self.FROZEN_CALLS:
-                return self._reset()
+                return self._stuck(environment)
         else:
             self._frozen_calls = 0
         self._last_timestep = timestep
@@ -116,10 +123,34 @@ class DefaultProblemGenerator(ProblemGenerator):
             self._last_signature = signature
             self._last_change_timestep = timestep
         elif timestep - self._last_change_timestep >= self.STALL_TICKS:
-            return self._reset()
+            return self._stuck(environment)
         return False
 
+    def _stuck(self, environment: Environment) -> bool:
+        """Replan because the chefs are stuck, varying the plan if it recurs.
+
+        If the last replan for being stuck made no progress at all, the same
+        plan would most likely get stuck the same way, so the next one covers
+        only the first order, which changes who does what. After a few
+        fruitless attempts, stop spending planning time on it.
+        """
+        signature = (environment.timestep, kitchen_signature(environment))
+        if signature == self._stuck_signature:
+            self._stuck_count += 1
+        else:
+            self._stuck_count = 1
+        self._stuck_signature = signature
+        if self._stuck_count > self.MAX_STUCK_REPLANS:
+            return False
+        stuck_count = self._stuck_count
+        self._reset()
+        self._stuck_count = stuck_count
+        self.horizon = 1 if stuck_count >= 2 else None
+        return True
+
     def _reset(self) -> bool:
+        self.horizon = None
+        self._stuck_count = 0
         self._orders = None
         self._last_signature = None
         self._last_timestep = None
@@ -176,7 +207,7 @@ FIRST_PROBE_SECONDS = 10.0
 LATER_PROBE_SECONDS = 4.0
 
 
-def goal_sets(kitchen: Kitchen):
+def goal_sets(kitchen: Kitchen, horizon: int | None = None):
     """Goal sets to try, best first, each with a time limit for checking it.
 
     A problem with an unreachable goal gives no plan at all and the chefs
@@ -185,7 +216,7 @@ def goal_sets(kitchen: Kitchen):
     order on its own, without the feasibility check in case it was wrong.
     """
     queue = queued_orders(kitchen)
-    feasible = feasible_orders(kitchen, queue)
+    feasible = feasible_orders(kitchen, queue)[:horizon]
     tried: list[list] = []
     seconds = FIRST_PROBE_SECONDS
     candidates = [feasible[:n] for n in range(len(feasible), 0, -1)]
@@ -327,6 +358,10 @@ def describe_counters(kitchen: Kitchen, problem: ProblemBuilder) -> None:
             continue
         item = kitchen.item_symbol(counter.held_item_id)
         if item is not None:
+            problem.add_fact(f"(on {item} {loc_symbol(location)})")
+    for location, item_id in sorted(kitchen.loose_items.items()):
+        item = kitchen.item_symbol(item_id)
+        if item is not None and loc_symbol(location) in problem.objects:
             problem.add_fact(f"(on {item} {loc_symbol(location)})")
 
 
@@ -547,43 +582,54 @@ def feasible_orders(kitchen: Kitchen, entries: list) -> list:
     for food in kitchen.environment.get_entities_of_type(Food):
         stock[food.name] = stock.get(food.name, 0) + 1
 
-    def make(food: str, stock: dict[str, int], depth: int) -> dict[str, int] | None:
-        """Stock left after making one ``food``, or None if it cannot be made."""
-        if stock.get(food, 0) > 0:
-            return {**stock, food: stock[food] - 1}
+    def options(food: str, stock: tuple, depth: int) -> set[tuple]:
+        """Every stock that could be left after making one ``food``."""
+        have = dict(stock)
+        results: set[tuple] = set()
+        if have.get(food, 0) > 0:
+            have[food] -= 1
+            results.add(tuple(sorted((k, v) for k, v in have.items() if v)))
         if food in infinite:
-            return stock
-        if depth > 12:
-            return None
+            results.add(stock)
+        if depth > 12 or len(results) and food in infinite:
+            return results
         for recipe in kitchen.state.cook_recipes:
             if recipe.output == food and recipe.equipment in equipment:
-                left = make(recipe.ingredient, stock, depth + 1)
-                if left is not None:
-                    return left
+                results |= options(recipe.ingredient, stock, depth + 1)
         for recipe in kitchen.state.combine_recipes:
             if recipe.output != food:
                 continue
             first, *rest = sorted(recipe.ingredients)
             second = rest[0] if rest else first
-            left = make(first, stock, depth + 1)
-            if left is not None:
-                left = make(second, left, depth + 1)
-                if left is not None:
-                    return left
-        return None
+            for left in options(first, stock, depth + 1):
+                results |= options(second, left, depth + 1)
+            if len(results) > 64:
+                break
+        return results
 
     plates = plate_supply(kitchen, reachable)
-    kept = []
-    for entry in entries:
-        if plates is not None and plates <= 0:
-            break
-        left = make(entry.name, stock, 0)
-        if left is not None:
-            stock = left
-            kept.append(entry)
-            if plates is not None:
-                plates -= 1
-    return kept
+    start = tuple(sorted(stock.items()))
+    memo: dict = {}
+
+    def best(i: int, stock: tuple, plates: int | None) -> tuple[int, ...]:
+        """Indices of the most orders from ``i`` on that can still be made,
+        preferring earlier ones."""
+        if i == len(entries) or plates == 0:
+            return ()
+        key = (i, stock, plates)
+        if key in memo:
+            return memo[key]
+        chosen = best(i + 1, stock, plates)
+        for left in sorted(options(entries[i].name, stock, 0)):
+            rest = best(i + 1, left, None if plates is None else plates - 1)
+            if len(rest) + 1 > len(chosen):
+                chosen = (i, *rest)
+                if len(chosen) == len(entries) - i:
+                    break
+        memo[key] = chosen
+        return chosen
+
+    return [entries[i] for i in best(0, start, plates)]
 
 
 def plate_supply(kitchen: Kitchen, reachable: set) -> int | None:

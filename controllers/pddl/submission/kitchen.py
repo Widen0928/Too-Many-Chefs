@@ -115,12 +115,7 @@ class Kitchen:
         self.chefs = [a for a in agents if a.x is not None and a.y is not None]
         for chef in self.chefs:
             region = self.region(chef.x, chef.y)  # type: ignore[arg-type]
-            self.reach[chef.id] = {
-                neighbour
-                for tile in region
-                for neighbour in _neighbours(tile)
-                if neighbour not in self.walkable
-            }
+            self.reach[chef.id] = self.reach_from(region)
 
     # --- Level-wide information ------------------------------------------------
 
@@ -194,6 +189,16 @@ class Kitchen:
             for x in range(x0, x0 + b.width)
             for y in range(y0, y0 + b.height)
             if is_walkable(self.environment, x, y, ignore_agents=True)
+        }
+
+    def reach_from(self, region: set[Location]) -> set[Location]:
+        """Tiles a chef walking ``region`` can act on: those beside it that
+        are not floor, plus floor tiles with food or a plate lying on them."""
+        return {
+            neighbour
+            for tile in region
+            for neighbour in _neighbours(tile)
+            if neighbour not in self.walkable or neighbour in self.loose_items
         }
 
     def region(self, x: int, y: int) -> set[Location]:
@@ -296,9 +301,11 @@ class Kitchen:
             for equipment in equipments:
                 if not equipment.can_process_food:
                     continue
-                if not any(
+                if equipment.held_item_id is None and not any(
                     self.legal_accepts(food, equipment.name) for food in self.food_names
                 ):
+                    # Takes nothing; but food a level puts straight onto a
+                    # stove or mixer can still be taken off it.
                     continue
                 symbol = f"s_{loc[0]}_{loc[1]}_{short_name(equipment.name)}"
                 stations.append(
@@ -365,6 +372,28 @@ class Kitchen:
         return any(other.name == equipment.requires for other in cell)
 
     @cached_property
+    def loose_items(self) -> dict[Location, str]:
+        """Food or plates lying on a tile with no counter or station to hold them.
+
+        A level puts food straight on the floor when its cell has nothing to
+        hold it. It can be picked up, but nothing can be put back there.
+        """
+        held: set[str] = set()
+        for cls in (Counter, Equipment, Agent):
+            for entity in self.environment.get_entities_of_type(cls):
+                if entity.held_item_id is not None:
+                    held.add(entity.held_item_id)
+        loose: dict[Location, str] = {}
+        for cls in (Food, Plate):
+            for item in self.environment.get_entities_of_type(cls):
+                if item.x is None or item.y is None or item.id in held:
+                    continue
+                if (item.x, item.y) in self.counters:
+                    continue
+                loose.setdefault((item.x, item.y), item.id)
+        return loose
+
+    @cached_property
     def targets(self) -> set[Location]:
         """Every tile a chef might act on."""
         return (
@@ -376,6 +405,7 @@ class Kitchen:
             | self.sinks
             | {station.location for station in self.stations if station.location}
             | self.support_locations
+            | set(self.loose_items)
         )
 
     def item_symbol(self, item_id: str | None) -> str | None:

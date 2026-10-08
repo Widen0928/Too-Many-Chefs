@@ -48,7 +48,37 @@ class DefaultFromPDDL(FromPDDL):
         plan: list[MutationWithLocation] = []
         for step in steps:
             plan.extend(translator.translate(step))
+        if plan and _orders_left_out(kitchen, steps):
+            plan.append(_wait_to_replan(plan[-1]))
         return plan
+
+
+def _orders_left_out(kitchen: Kitchen, steps: list[PDDLPlanStep]) -> bool:
+    """Whether the plan serves fewer orders than the kitchen could.
+
+    That happens when the planner ran out of time on the full set of orders
+    and the problem generator fell back to fewer.
+    """
+    from .problem_generator import feasible_orders, queued_orders
+
+    served = sum(1 for step in steps if step.name.startswith("deliver"))
+    return served < len(feasible_orders(kitchen, queued_orders(kitchen)))
+
+
+def _wait_to_replan(last: MutationWithLocation) -> MutationWithLocation:
+    """A final step that never becomes legal, so the chef waits where it is.
+
+    Once everything else is done, nobody can act and time stops; the problem
+    generator notices and replans for the orders this plan left out. Without
+    it the controller would finish with those orders unserved.
+    """
+    return MutationWithLocation(
+        mutation=PickUp(
+            agent_id=last.mutation.agent_id,  # type: ignore[attr-defined]
+            expected_input_name="(replan for the remaining orders)",
+        ),
+        location=last.location,
+    )
 
 
 class _Translator:

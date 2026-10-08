@@ -106,15 +106,7 @@ class _Dispatcher:
         self.regions = {
             c: kitchen.region(chef.x, chef.y) for c, chef in self.chefs.items()
         }
-        self.reach = {
-            c: {
-                n
-                for tile in region
-                for n in _neighbours(tile)
-                if n not in kitchen.walkable
-            }
-            for c, region in self.regions.items()
-        }
+        self.reach = {c: kitchen.reach_from(region) for c, region in self.regions.items()}
         self._find_episodes()
         # Dead-end tiles: one chef waiting in one while another needs it
         # makes the controller's traffic rules give up with a deadlock, so
@@ -282,6 +274,8 @@ class _Dispatcher:
         # A chef's jobs must not interleave in plan order: if they did, a job
         # could end up waiting on a later step of the same chef.
         last_index = {c: -1 for c in self.chefs}
+        # Chefs holding something they have not put down yet.
+        hands_full = {c for c, chef in self.chefs.items() if chef.held_item_id is not None}
         result: list[tuple[int, PDDLPlanStep]] = []
 
         for item in self.jobs():
@@ -294,7 +288,12 @@ class _Dispatcher:
                 result.append((index, step))
                 continue
             job = item
-            candidates = [job.chef] if job.pinned else list(self.chefs)
+            # A chef whose hands are full can only carry on with its own job.
+            candidates = (
+                [job.chef]
+                if job.pinned
+                else [c for c in self.chefs if c not in hands_full]
+            )
             best = None
             first = job.steps[0][0]
             for c in candidates:
@@ -326,6 +325,10 @@ class _Dispatcher:
                       + "; ".join(f"{i}:{st.name} {' '.join(st.parameters[1:])}" for i, st in new_steps))
             free[c] = finish
             last_index[c] = job.steps[-1][0]
+            if job.steps[-1][1].name in END:
+                hands_full.discard(c)
+            else:
+                hands_full.add(c)
             at_target[c] = last_target
             for key, uses in touched.items():
                 ready.setdefault(key, []).extend(uses)
