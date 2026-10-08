@@ -59,13 +59,17 @@ END = {
 # Steps that act on a station: (station parameter, location parameter).
 STATION_STEPS = {
     "station_onto_plate_tended",
+    "combine_from_station_tended",
     "put_in_station", "add_to_station", "combine_from_station", "take_out", "cook",
     "station_onto_plate", "plate_into_station", "plate_add_to_station",
 }
 FILL_STEPS = {"put_in_station", "plate_into_station"}
 EMPTY_STEPS = {
     "take_out", "station_onto_plate", "station_onto_plate_tended", "combine_from_station",
+    "combine_from_station_tended",
 }
+# Steps that take food out of a station onto the held plate.
+TAKING_OUT = {"station_onto_plate", "station_onto_plate_tended"}
 # Steps that leave the chef holding an empty plate.
 EMPTYING = {"plate_into_station", "plate_add_to_station", "discard_from_plate", "wash"}
 # Steps whose target can be swapped for any tile of the same kind.
@@ -97,6 +101,8 @@ class Options:
     move_stations: str = "any"
     split_cooks: bool = True
     split_plates: bool = True
+    # Set a plate down by the station after taking food out onto it.
+    park_dishes: bool = False
     # Schedule jobs by their dependencies rather than in plan order.
     reorder: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
@@ -258,8 +264,9 @@ class _Dispatcher:
         """Jobs in plan order; chefless steps (cooking by itself) stay as they are."""
         out: list[Job | tuple[int, PDDLPlanStep]] = []
         open_jobs: dict[str, Job] = {}
-        # Chefs left holding an empty plate, and where they emptied it.
-        emptied: dict[str, Location] = {}
+        # Chefs left holding a plate that could be set down for someone else
+        # to carry on with: where, and the plate's state.
+        emptied: dict[str, tuple[Location | None, str]] = {}
         for c, chef in self.chefs.items():
             if chef.held_item_id is not None:
                 job = Job(chef=c, pinned=True)
@@ -282,14 +289,15 @@ class _Dispatcher:
                 if step.name in BEGIN:
                     open_jobs[c] = job
             if c in emptied and job is open_jobs.get(c) and job.steps:
-                # The chef has carried an empty plate since its last step:
-                # set it down nearby so someone else can take over from here.
-                spot = self._park_spot(emptied[c], job.steps[-1][0], index)
+                # The chef has carried a plate since its last step: set it
+                # down nearby so someone else can take over from here.
+                near, plate = emptied[c]
+                spot = self._park_spot(near, job.steps[-1][0], index)
                 if spot is not None:
                     job.steps.append(
-                        (job.steps[-1][0] + 0.3, PDDLPlanStep("put_down", (c, spot, "p_empty")))
+                        (job.steps[-1][0] + 0.3, PDDLPlanStep("put_down", (c, spot, plate)))
                     )
-                    job = Job(chef=c, steps=[(index - 0.3, PDDLPlanStep("pick_up", (c, spot, "p_empty")))])
+                    job = Job(chef=c, steps=[(index - 0.3, PDDLPlanStep("pick_up", (c, spot, plate)))])
                     out.append(job)
                     open_jobs[c] = job
             emptied.pop(c, None)
@@ -297,7 +305,12 @@ class _Dispatcher:
             if step.name in END:
                 open_jobs.pop(c, None)
             elif step.name in EMPTYING and self.options.split_plates:
-                emptied[c] = _target(step)
+                emptied[c] = (_target(step), "p_empty")
+            elif step.name in TAKING_OUT and self.options.park_dishes:
+                # Food just taken out of a station onto a plate: the chef can
+                # leave the plate by the station and get the station going
+                # again while someone else finishes the dish.
+                emptied[c] = (_target(step), step.parameters[-1])
         out = [j for j in out if not isinstance(j, Job) or j.steps]
         return self._pair_burnable(out)
 

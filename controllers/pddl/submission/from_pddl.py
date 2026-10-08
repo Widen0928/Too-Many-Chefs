@@ -142,6 +142,8 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
         for split in (True, False):
             yield Options(move_stations=move, split_cooks=split, split_plates=split)
     yield Options(move_stations="any", split_cooks=True, split_plates=False)
+    yield Options(park_dishes=True)
+    yield Options(move_stations="off", park_dishes=True)
     yield None
     chefs = [chef_symbol(a.id) for a in kitchen.chefs]
     if len(chefs) >= 3:
@@ -151,15 +153,17 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
 
 
 def _orders_left_out(kitchen: Kitchen, steps: list[PDDLPlanStep]) -> bool:
-    """Whether the plan serves fewer orders than the kitchen could.
+    """Whether the plan serves fewer orders than are waiting.
 
     That happens when the planner ran out of time on the full set of orders
-    and the problem generator fell back to fewer.
+    and the problem generator fell back to fewer, or when the stock check
+    judged an order impossible. Either way, once the plan is done the
+    controller replans and tries the rest one by one rather than stopping.
     """
-    from .problem_generator import feasible_orders, queued_orders
+    from .problem_generator import queued_orders
 
     served = sum(1 for step in steps if step.name.startswith("deliver"))
-    return served < len(feasible_orders(kitchen, queued_orders(kitchen)))
+    return served < len(queued_orders(kitchen))
 
 
 def _wait_to_replan(last: MutationWithLocation) -> MutationWithLocation:
@@ -400,6 +404,9 @@ class _Translator:
             ),
             loc,
         )
+
+    def _combine_from_station_tended(self, *args: str):
+        return self._combine_from_station(*args)
 
     def _station_onto_plate_tended(self, *args: str):
         return self._station_onto_plate(*args)

@@ -229,9 +229,18 @@
   (:action combine_from_station
     :parameters (?c - chef ?s - station ?l - loc ?f - food ?e - food ?o - food)
     :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
-                       (merge_hand ?s ?f ?e ?o))
+                       (merge_hand ?s ?f ?e ?o) (open_station ?s))
     :effect (and (holds ?c ?o) (not (holds ?c ?f))
                  (st_empty ?s) (not (in ?e ?s)))
+  )
+
+  ; The same, for the chef tending a station that would burn the food.
+  (:action combine_from_station_tended
+    :parameters (?c - chef ?s - station ?l - loc ?f - food ?e - food ?o - food)
+    :precondition (and (reach ?c ?l) (st_at ?s ?l) (holds ?c ?f) (in ?e ?s)
+                       (merge_hand ?s ?f ?e ?o) (tending ?c ?s))
+    :effect (and (holds ?c ?o) (not (holds ?c ?f))
+                 (st_empty ?s) (not (in ?e ?s)) (not (tending ?c ?s)))
   )
 
   ; Take food out of a station that cannot be lifted, such as a cutboard.

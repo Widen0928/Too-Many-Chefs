@@ -478,7 +478,7 @@ def describe_stations(kitchen: Kitchen, problem: ProblemBuilder) -> None:
                 args = f"{food_symbol(incoming)} {food_symbol(existing)} {food_symbol(output)}"
                 if kitchen.legal_accepts(output, name):
                     problem.add_fact(f"(merge_in {s} {args})")
-                elif not kitchen.sim_accepts(output, name) and not burns:
+                elif not kitchen.sim_accepts(output, name):
                     problem.add_fact(f"(merge_hand {s} {args})")
 
         for food in foods:
