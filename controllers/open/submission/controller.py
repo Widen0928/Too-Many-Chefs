@@ -71,8 +71,8 @@ WAIT_SECONDS = None if __import__("os").environ.get("L4_SYNC") else 0.12
 PLAN_SECONDS = 3.0
 # A way round another chef is taken at once if it is at most this much
 # longer than the direct way; otherwise the chef waits a few ticks first.
-DETOUR_SLACK = 2
-MAX_WAIT = 8
+DETOUR_SLACK = int(__import__("os").environ.get("L4_SLACK", "2"))
+MAX_WAIT = int(__import__("os").environ.get("L4_MAX_WAIT", "8"))
 BLOCKED_EXTRA = int(__import__("os").environ.get("L4_BLOCKED_EXTRA", "8"))
 # Swap the plan's stations for nearer equivalents.
 RELOCATE = __import__("os").environ.get("L4_RELOCATE", "1") == "1"
@@ -87,6 +87,16 @@ REPAIR = __import__("os").environ.get("L4_REPAIR", "1") == "1"
 EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 # Leave alone orders an opponent is visibly making (holds part of).
 RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
+# Call the planner when food already made lies about (it may use it).
+USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
+# Plan with only the foods that matter for the dish (much quicker), and
+# what that costs in a match (ticks, for local evaluation).
+PRUNE = __import__("os").environ.get("L4_PRUNE", "1") == "1"
+PRUNED_TICKS = float(__import__("os").environ.get("L4_PRUNED_TICKS", "1"))
+# After getting stuck, plan the same dish again first.
+STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
+# Local evaluation only: print plans started and dishes served.
+LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
 # Drop orders that cannot be served in time even as a last resort.
@@ -126,6 +136,7 @@ class OpenController(Controller):
         self._steps: list = []
         self._step_of: list[int] = []
         self._repaired_at = -999
+        self._ticks_by_kind: dict[str, int] = {}
         self._floor: set | None = None
         self._foreign: frozenset = frozenset()
 
@@ -137,6 +148,21 @@ class OpenController(Controller):
         except Exception:  # noqa: BLE001 - never lose a set to an error
             self._plan = []
             actions = []
+        if LOG:
+            kinds = {type(a).__name__ for a in actions}
+            if "MoveAgent" in kinds:
+                kind = "walk"
+            elif kinds - {"TurnAgent"}:
+                kind = "act"
+            elif self._future is not None or environment.timestep < self._hold_until:
+                kind = "planning"
+            elif not self._plan:
+                kind = "idle"
+            elif kinds:
+                kind = "wait"
+            else:
+                kind = "blocked"
+            self._ticks_by_kind[kind] = self._ticks_by_kind.get(kind, 0) + 1
         if actions:
             return actions
         # Idle: answer with a turn on the spot, so every tick gets an action.
@@ -153,6 +179,8 @@ class OpenController(Controller):
         return False
 
     def shutdown(self) -> None:
+        if LOG:
+            print("LOG 0 - ticks", " ".join(f"{k}={v}" for k, v in sorted(self._ticks_by_kind.items())), flush=True)
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     # --- Each tick ---------------------------------------------------------------
@@ -184,11 +212,13 @@ class OpenController(Controller):
             except Exception:  # noqa: BLE001
                 plan, target, steps, step_of = [], None, [], []
             self._future = None
+            if LOG:
+                print("LOG", environment.timestep, chef.id, "plan", target and _short(target), len(plan), flush=True)
             self._plan, self._target = plan, target
             self._steps, self._step_of = steps, step_of
             self._held_back = 0
             if CALL_TICKS and WAIT_SECONDS is None:
-                self._hold_until = environment.timestep + CALL_TICKS * self._calls
+                self._hold_until = environment.timestep + round(CALL_TICKS * self._calls)
             self._calls = 0
             self._stuck = 0
             if not plan:
@@ -203,6 +233,14 @@ class OpenController(Controller):
             or (self._target is not None and self._target not in visible)
             or self._stuck > STUCK_TICKS
         ):
+            if LOG:
+                why = (
+                    "done" if not self._plan
+                    else "gone" if self._target is not None and self._target not in visible
+                    else getattr(self, "_why", "") or "slow"
+                )
+                self._why = ""
+                print("LOG", environment.timestep, chef.id, "why", why, len(self._plan), flush=True)
             repair = None
             if (
                 REPAIR
@@ -216,9 +254,13 @@ class OpenController(Controller):
                 # stations, which needs no planner call.
                 repair = (self._target, self._steps[self._step_of[0]:])
                 self._repaired_at = environment.timestep
+            # Stuck partway through a dish that is still on order: keep at
+            # it (the planner can use what is already made) unless that
+            # fails.
+            keep = self._target if self._plan and self._target in visible and STICKY else None
             self._plan, self._step_of = [], []
             self._future = self._executor.submit(
-                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair
+                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep
             )
             try:
                 self._future.result(timeout=WAIT_SECONDS)
@@ -287,6 +329,7 @@ class OpenController(Controller):
             self._advance()
             return [mutation]
         if EARLY and self._taken(environment, target):
+            self._why = "taken"
             self._stuck = STUCK_TICKS + 1  # the station we meant to use is taken
             return []
         if abs(position[0] - target[0]) + abs(position[1] - target[1]) == 1:
@@ -295,6 +338,8 @@ class OpenController(Controller):
             if chef.orientation != facing:
                 actions.append(TurnAgent(agent_id=chef.id, orientation=facing))
             if can_apply_mutation(environment, *actions, mutation):
+                if LOG and type(mutation).__name__ == "Deliver":
+                    print("LOG", environment.timestep, chef.id, "deliver", flush=True)
                 self._advance()
                 self._held_back = 0
                 return [*actions, mutation]
@@ -304,6 +349,7 @@ class OpenController(Controller):
             self._held_back += 1
             if self._held_back > _patience(environment, target):
                 self._held_back = 0
+                self._why = "patience"
                 self._stuck = STUCK_TICKS + 1
             return actions
         return self._walk(environment, chef, target)
@@ -347,6 +393,7 @@ class OpenController(Controller):
             if move is None:
                 self._blocked_ticks += 1
                 if self._blocked_ticks > BLOCKED_TICKS:
+                    self._why = "?"
                     self._stuck = STUCK_TICKS + 1
                 return []
             self._blocked_ticks = 0
@@ -375,12 +422,13 @@ class OpenController(Controller):
         if free_step is None:
             self._blocked_ticks += 1
             if self._blocked_ticks > BLOCKED_TICKS + BLOCKED_EXTRA:
+                self._why = "blocked"
                 self._stuck = STUCK_TICKS + 1  # replan around whoever is in the way
         return []
 
     # --- Planning (background thread) -------------------------------------------
 
-    def _make_plan(self, environment: Environment, chef_id: str, blocked=(), repair=None):
+    def _make_plan(self, environment: Environment, chef_id: str, blocked=(), repair=None, keep=None):
         """A plan for this chef for the best order it can make now.
 
         Plans from the library (see library.py) that check out against the
@@ -402,6 +450,12 @@ class OpenController(Controller):
         me = next(c for c in kitchen.chefs if c.id == chef_id)
         c = chef_symbol(chef_id)
         choices = self._choose_orders(environment, chef_id)
+        if keep is not None:
+            current = [
+                e for e in environment.get_first_entity_of_type(OvercookedState).order_queue.visible
+                if e.name == keep
+            ][:1]
+            choices = current + [e for e in choices if e.name != keep]
 
         def relocated(steps):
             if not RELOCATE:
@@ -467,14 +521,28 @@ class OpenController(Controller):
                         candidates.append(steps)
             if not candidates or _made_food_helps(environment, kitchen, entry, chef_id):
                 for fast in MODEL_ORDER:
-                    self._calls += 1
-                    try:
-                        steps = solve_problem_with_logging(
-                            PDDLProblem(domain=build_domain(), problem=problems[fast]),
-                            time_limit_seconds=PLAN_SECONDS,
-                        )
-                    except Exception:  # noqa: BLE001
-                        steps = []
+                    steps = []
+                    if PRUNE:
+                        self._calls += PRUNED_TICKS / max(1, CALL_TICKS)
+                        try:
+                            steps = solve_problem_with_logging(
+                                PDDLProblem(
+                                    domain=build_domain(),
+                                    problem=_pruned(problems[fast], environment, entry.name),
+                                ),
+                                time_limit_seconds=PLAN_SECONDS,
+                            )
+                        except Exception:  # noqa: BLE001 - try the whole problem
+                            steps = []
+                    if not steps:
+                        self._calls += 1
+                        try:
+                            steps = solve_problem_with_logging(
+                                PDDLProblem(domain=build_domain(), problem=problems[fast]),
+                                time_limit_seconds=PLAN_SECONDS,
+                            )
+                        except Exception:  # noqa: BLE001
+                            steps = []
                     if steps:
                         # Kept even if it uses food already out: the check
                         # before any reuse rules out plans that no longer fit.
@@ -703,6 +771,34 @@ def _patience(environment: Environment, target) -> int:
     return wait
 
 
+def _pruned(problem: str, environment: Environment, dish: str) -> str:
+    """``problem`` without the foods (and plates of them) that neither go
+    into ``dish`` nor lie in the kitchen already, nor any fact about them.
+
+    The full problem lists all 45 foods of the menu and every way to plate
+    them; Fast Downward spends most of its time grounding those. Taking
+    facts away only takes plans away, so any plan for the smaller problem
+    works for the whole one, and it is found three to four times faster.
+    """
+    import re
+
+    from .planner.kitchen import food_symbol, plate_symbol
+
+    state = environment.get_first_entity_of_type(OvercookedState)
+    foods = _components(state, dish) | {f.name for f in environment.get_entities_of_type(Food)}
+    keep = {food_symbol(f) for f in foods} | {plate_symbol(f) for f in foods}
+    keep |= {"p_empty", "p_dirty"}
+    lines = []
+    for line in problem.split("\n"):
+        if any(
+            (token.startswith("f_") or token.startswith("p_")) and token not in keep
+            for token in re.findall(r"[^\s()]+", line)
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _made_food_helps(environment, kitchen, entry, chef_id) -> bool:
     """Whether food already made (not raw) that goes into ``entry`` lies in
     the kitchen, or this chef holds anything: then a fresh plan may use it,
@@ -715,6 +811,8 @@ def _made_food_helps(environment, kitchen, entry, chef_id) -> bool:
     me = next(a for a in environment.get_entities_of_type(Agent) if a.id == chef_id)
     if me.held_item_id is not None:
         return True
+    if not USE_MADE:
+        return False
     for food in environment.get_entities_of_type(Food):
         if food.name in wanted and not kitchen.is_raw(food.name):
             holder = holders.get(food.id)
