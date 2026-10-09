@@ -69,6 +69,13 @@ ORDERS_PER_PLAN = int(__import__("os").environ.get("L4_ORDERS", "1"))
 WAIT_SECONDS = None if __import__("os").environ.get("L4_SYNC") else 0.12
 # Seconds the planner may take for one order.
 PLAN_SECONDS = 3.0
+# A way round another chef is taken at once if it is at most this much
+# longer than the direct way; otherwise the chef waits a few ticks first.
+DETOUR_SLACK = 2
+MAX_WAIT = 8
+# Swap the plan's stations for nearer equivalents.
+RELOCATE = __import__("os").environ.get("L4_RELOCATE", "1") == "1"
+NEW_WALK = __import__("os").environ.get("L4_WALK", "1") == "1"
 
 
 def _short(name: str) -> str:
@@ -93,6 +100,9 @@ class OpenController(Controller):
         self._watched_at = -1
         self._last_held: dict[str, int] = {}
         self._blocked_ticks = 0
+        self._waiting = 0
+        self._floor: set | None = None
+        self._foreign: frozenset = frozenset()
 
     # --- Controller interface -----------------------------------------------
 
@@ -133,6 +143,8 @@ class OpenController(Controller):
         if environment.timestep != self._watched_at:
             self._watched_at = environment.timestep
             self._watch(environment)
+        if self._floor is None or (chef.x, chef.y) not in self._floor:
+            self._map(environment, chef)
 
         if self._future is not None and not self._future.done():
             # The host waits for our answer (up to 200 ms) before the kitchen
@@ -191,6 +203,27 @@ class OpenController(Controller):
                 self._still[agent.id] = 0
             self._seen[agent.id] = where
 
+    def _map(self, environment: Environment, chef: Agent) -> None:
+        """The floor, and which part of it is the other team's side."""
+        from simulator.entities import Bounds
+        from simulator.mutations.move_agent import is_walkable
+
+        from .routing import foreign_tiles
+
+        b = environment.get_first_entity_of_type(Bounds)
+        x0, y0 = b.x or 0, b.y or 0
+        self._floor = {
+            (x, y)
+            for x in range(x0, x0 + b.width)
+            for y in range(y0, y0 + b.height)
+            if is_walkable(environment, x, y, ignore_agents=True)
+        }
+        agents = [a for a in environment.get_entities_of_type(Agent) if a.x is not None]
+        if chef.team is not None and self._foreign == frozenset():
+            ours = [(a.x, a.y) for a in agents if a.team == chef.team]
+            theirs = [(a.x, a.y) for a in agents if a.team != chef.team]
+            self._foreign = foreign_tiles(self._floor, ours, theirs)
+
     def _parked(self, environment: Environment, chef_id: str) -> set:
         """Tiles of other chefs that have not moved for a while: plan around them."""
         return {
@@ -219,14 +252,49 @@ class OpenController(Controller):
                 self._plan.pop(0)
                 return [*actions, mutation]
             return actions  # face it and wait (food still cooking, say)
-        move = _next_move(environment, chef, target)
-        if move is None:
+        return self._walk(environment, chef, target)
+
+    def _walk(self, environment: Environment, chef: Agent, target) -> list[Mutation]:
+        """Step towards ``target``. When another chef blocks the direct way
+        and the way round is much longer, edge closer and wait a few ticks
+        for them to move, as they usually do."""
+        from .routing import route
+
+        if not NEW_WALK:
+            move = _next_move(environment, chef, target)
+            if move is None:
+                self._blocked_ticks += 1
+                if self._blocked_ticks > BLOCKED_TICKS:
+                    self._stuck = STUCK_TICKS + 1
+                return []
+            self._blocked_ticks = 0
+            return [move]
+        position = (chef.x, chef.y)
+        others = frozenset(
+            (a.x, a.y)
+            for a in environment.get_entities_of_type(Agent)
+            if a.id != chef.id and a.x is not None
+        )
+        floor = self._floor or set()
+        free_step, free_cost = route(floor, self._foreign, position, target, others)
+        direct_step, direct_cost = route(floor, self._foreign, position, target)
+        if free_step is not None and (
+            direct_cost is None or free_cost <= direct_cost + DETOUR_SLACK
+        ):
+            self._waiting = 0
+            self._blocked_ticks = 0
+            return [_move(chef, position, free_step)]
+        self._waiting += 1
+        if free_step is not None and self._waiting > min(MAX_WAIT, free_cost - direct_cost):
+            self._blocked_ticks = 0
+            return [_move(chef, position, free_step)]  # waited long enough: go round
+        if direct_step is not None and direct_step not in others:
+            return [_move(chef, position, direct_step)]
+        if free_step is None:
             self._blocked_ticks += 1
-            if self._blocked_ticks > BLOCKED_TICKS:
+            if self._blocked_ticks > BLOCKED_TICKS + MAX_WAIT:
                 self._stuck = STUCK_TICKS + 1  # replan around whoever is in the way
-            return []
-        self._blocked_ticks = 0
-        return [move]
+        return []
 
     # --- Planning (background thread) -------------------------------------------
 
@@ -239,7 +307,10 @@ class OpenController(Controller):
         from .planner.kitchen import Kitchen
         from .planner.problem_generator import build_domain, build_problem
 
+        from .routing import relocate_stations
+
         kitchen = Kitchen(environment, [chef_id], blocked=frozenset(blocked))
+        me = next(c for c in kitchen.chefs if c.id == chef_id)
         choices = self._choose_orders(environment, chef_id)
         # Two orders in one plan let the chef fill the time food spends in
         # the oven or fryer with the next dish; one order is the fallback.
@@ -259,6 +330,11 @@ class OpenController(Controller):
                     )
                 except Exception:  # noqa: BLE001
                     steps = []
+                if steps and RELOCATE:
+                    try:
+                        steps = relocate_stations(kitchen, me, steps, environment)
+                    except Exception:  # noqa: BLE001 - keep the planner's choice
+                        pass
                 if steps:
                     chosen = dispatch(
                         kitchen,
@@ -376,6 +452,10 @@ class OpenController(Controller):
 
 
 # --- Helpers ---------------------------------------------------------------------
+
+
+def _move(chef: Agent, position, tile) -> MoveAgent:
+    return MoveAgent(agent_id=chef.id, dx=tile[0] - position[0], dy=tile[1] - position[1])
 
 
 def _facing(position: tuple[int, int], target: tuple[int, int]) -> str:

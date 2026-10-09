@@ -32,6 +32,8 @@ def main() -> None:
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--end", type=int, default=10**9)
     p.add_argument("--level", default="levels/3_too_many_chefs/0_full_menu.yaml")
+    p.add_argument("--base", default="", help="another submission folder to compare against")
+    p.add_argument("--base-chefs", default="", help="chefs driven by the --base controller")
     a = p.parse_args()
     env = load(load_configuration(a.level))
     controllers = {}
@@ -40,6 +42,12 @@ def main() -> None:
         c.set_controlled_agents({name})
         controllers[name] = c
     from controllers.open.example import ExampleController
+    if a.base:
+        base = _load_base(a.base)
+        for name in [b for b in a.base_chefs.split(",") if b]:
+            c = base.OpenController()
+            c.set_controlled_agents({name})
+            controllers[name] = c
     walkers = {}
     for name in [w for w in a.walkers.split(",") if w]:
         w = ExampleController()
@@ -83,6 +91,21 @@ def main() -> None:
     print("score", state.score, "by agent", state.score_by_agent, "delivered", state.order_queue.delivered_count, f"slowest tick {slow*1000:.0f} ms")
     for c in controllers.values():
         c.shutdown()
+
+
+def _load_base(folder: str):
+    """Import another copy of the submission under its own package name."""
+    import importlib
+    import importlib.util
+
+    name = "base_submission"
+    spec = importlib.util.spec_from_file_location(
+        name, Path(folder) / "__init__.py", submodule_search_locations=[folder]
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return importlib.import_module(name + ".controller")
 
 
 if __name__ == "__main__":
