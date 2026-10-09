@@ -2,6 +2,7 @@ from typing import Annotated
 
 from pydantic import Field
 
+from simulator.mutations.actions_per_chef import limit_actions_per_chef
 from simulator.mutations.advance_cooking import AdvanceCooking
 from simulator.mutations.agent_mutation import AgentMutation
 from simulator.mutations.combine import Combine
@@ -74,5 +75,6 @@ __all__ = [
     "TurnAgent",
     "VirtualInput",
     "Wash",
+    "limit_actions_per_chef",
     "step_input",
 ]

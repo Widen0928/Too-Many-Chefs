@@ -264,6 +264,9 @@ class RulesConfiguration(ConfigurationModel):
     # Stations follow their own cook_time and cooks_by_itself settings. Without
     # this rule, every station cooks with one Cook action.
     timed_cooking: bool = False
+    # Maximum movements or other actions per chef per step, in addition to one
+    # turn. Excess mutations are discarded. None permits all submitted mutations.
+    actions_per_step: int | None = Field(default=1, ge=1)
 
 
 class ScoringConfiguration(ConfigurationModel):

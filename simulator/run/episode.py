@@ -69,18 +69,18 @@ class Episode:
         *,
         keep_illegal: bool = False,
     ) -> Step:
-        """Apply ``mutations`` in order and move the clock on one timestep.
+        """Apply permitted ``mutations`` and advance the clock by one timestep.
 
-        Illegal mutations are dropped before the step and left out of the
-        recording. Play mode sets ``keep_illegal`` so a human's press still
-        shows on the pad when it did nothing; the step skips it all the same.
+        ``Environment.limit_actions`` first removes mutations exceeding the
+        per-chef limit and orders the remaining mutations. Illegal mutations
+        are then excluded. Both are omitted from the recording, so an excess
+        action cannot replace an illegal one. Play mode sets ``keep_illegal``
+        to retain ineffective inputs in the recording and control-pad display;
+        execution still skips those mutations.
         """
         previous = self.environment
-        applied = (
-            list(mutations)
-            if keep_illegal
-            else filter_legal_actions(previous, mutations)
-        )
+        allowed = previous.limit_actions(mutations)
+        applied = allowed if keep_illegal else filter_legal_actions(previous, allowed)
         current = previous.step(applied)
         self.environment = current
         self.recording.environments.append(current)
