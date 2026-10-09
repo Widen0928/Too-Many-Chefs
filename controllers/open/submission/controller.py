@@ -81,6 +81,16 @@ USE_LIBRARY = __import__("os").environ.get("L4_LIBRARY", "1") == "1"
 # Local evaluation only (with L4_SYNC): ticks each planner call would cost
 # in a real match, where the host does not wait for the planner.
 CALL_TICKS = int(__import__("os").environ.get("L4_CALL_TICKS", "0"))
+# Ticks between two attempts to mend a plan rather than plan afresh.
+REPAIR_GAP = 20
+REPAIR = __import__("os").environ.get("L4_REPAIR", "1") == "1"
+EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
+# Leave alone orders an opponent is visibly making (holds part of).
+RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
+# Timesteps in a tournament game; nothing served after this counts.
+GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
+# Drop orders that cannot be served in time even as a last resort.
+STRICT = __import__("os").environ.get("L4_STRICT", "1") == "1"
 # Matches run slower than the plan's estimate (other chefs in the way).
 SLACK = 1.15
 
@@ -111,6 +121,11 @@ class OpenController(Controller):
         self._calls = 0
         self._hold_until = 0
         self._held_back = 0
+        # The PDDL steps behind the plan, and for each action left in the
+        # plan the step it carries out (-1 if not the first action of it).
+        self._steps: list = []
+        self._step_of: list[int] = []
+        self._repaired_at = -999
         self._floor: set | None = None
         self._foreign: frozenset = frozenset()
 
@@ -165,11 +180,12 @@ class OpenController(Controller):
                 pass
         if self._future is not None and self._future.done():
             try:
-                plan, target = self._future.result()
+                plan, target, steps, step_of = self._future.result()
             except Exception:  # noqa: BLE001
-                plan, target = [], None
+                plan, target, steps, step_of = [], None, [], []
             self._future = None
             self._plan, self._target = plan, target
+            self._steps, self._step_of = steps, step_of
             self._held_back = 0
             if CALL_TICKS and WAIT_SECONDS is None:
                 self._hold_until = environment.timestep + CALL_TICKS * self._calls
@@ -187,9 +203,22 @@ class OpenController(Controller):
             or (self._target is not None and self._target not in visible)
             or self._stuck > STUCK_TICKS
         ):
-            self._plan = []
+            repair = None
+            if (
+                REPAIR
+                and self._plan
+                and self._step_of
+                and self._step_of[0] >= 0
+                and self._target in visible
+                and environment.timestep - self._repaired_at > REPAIR_GAP
+            ):
+                # Stuck partway: first try the rest of the plan with other
+                # stations, which needs no planner call.
+                repair = (self._target, self._steps[self._step_of[0]:])
+                self._repaired_at = environment.timestep
+            self._plan, self._step_of = [], []
             self._future = self._executor.submit(
-                self._make_plan, environment, chef.id, self._parked(environment, chef.id)
+                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair
             )
             try:
                 self._future.result(timeout=WAIT_SECONDS)
@@ -255,15 +284,18 @@ class OpenController(Controller):
         self._stuck = self._stuck + 1 if progress == self._last else 0
         self._last = progress
         if target is None:
-            self._plan.pop(0)
+            self._advance()
             return [mutation]
+        if EARLY and self._taken(environment, target):
+            self._stuck = STUCK_TICKS + 1  # the station we meant to use is taken
+            return []
         if abs(position[0] - target[0]) + abs(position[1] - target[1]) == 1:
             facing = _facing(position, target)
             actions: list[Mutation] = []
             if chef.orientation != facing:
                 actions.append(TurnAgent(agent_id=chef.id, orientation=facing))
             if can_apply_mutation(environment, *actions, mutation):
-                self._plan.pop(0)
+                self._advance()
                 self._held_back = 0
                 return [*actions, mutation]
             # Wait while the food there is still cooking; anything else
@@ -275,6 +307,34 @@ class OpenController(Controller):
                 self._stuck = STUCK_TICKS + 1
             return actions
         return self._walk(environment, chef, target)
+
+    def _advance(self) -> None:
+        self._plan.pop(0)
+        if self._step_of:
+            self._step_of.pop(0)
+
+    def _taken(self, environment: Environment, target) -> bool:
+        """Whether the next step puts food into a station that now holds
+        someone else's food, so it cannot be done there."""
+        if not self._step_of or self._step_of[0] < 0 or not self._steps:
+            return False
+        step = self._steps[self._step_of[0]]
+        if step.name not in ("put_in_station", "plate_into_station"):
+            return False
+        from .planner.kitchen import parse_loc
+
+        location = parse_loc(step.parameters[2])
+        if location != tuple(target):
+            return False
+        from simulator.entities import Equipment
+
+        name = step.parameters[1].split("_", 3)[-1]
+        for item in environment.get_entities_of_type(Equipment):
+            if (item.x, item.y) == location and item.name.endswith("/" + name):
+                # Only food counts: an oven holds the stove stacked on it.
+                held = item.held_item_id
+                return held is not None and environment.get_entity_as(held, Food) is not None
+        return False
 
     def _walk(self, environment: Environment, chef: Agent, target) -> list[Mutation]:
         """Step towards ``target``. When another chef blocks the direct way
@@ -320,7 +380,7 @@ class OpenController(Controller):
 
     # --- Planning (background thread) -------------------------------------------
 
-    def _make_plan(self, environment: Environment, chef_id: str, blocked=()):
+    def _make_plan(self, environment: Environment, chef_id: str, blocked=(), repair=None):
         """A plan for this chef for the best order it can make now.
 
         Plans from the library (see library.py) that check out against the
@@ -332,7 +392,7 @@ class OpenController(Controller):
 
         from . import library
         from .planner.dispatch import Options, dispatch
-        from .planner.from_pddl import DefaultFromPDDL
+        from .planner.from_pddl import _Translator as _translator
         from .planner.kitchen import Kitchen, chef_symbol
         from .planner.problem_generator import build_domain, build_problem
         from .routing import relocate_stations
@@ -351,7 +411,43 @@ class OpenController(Controller):
             except Exception:  # noqa: BLE001 - keep the planner's choice
                 return steps
 
+        options = Options(solo=True, split_cooks=False, split_plates=False)
+
+        def finish(steps, entry):
+            chosen = dispatch(kitchen, steps, options)
+            translator = _translator(kitchen)
+            plan, step_of = [], []
+            for index, step in enumerate(chosen):
+                actions = [
+                    m for m in translator.translate(step)
+                    if getattr(m.mutation, "agent_id", chef_id) == chef_id
+                ]
+                plan += actions
+                if actions:
+                    step_of += [index] + [-1] * (len(actions) - 1)
+            return (plan, entry.name, chosen, step_of) if plan else None
+
+        if repair is not None:
+            target, remaining = repair
+            entry = next(
+                (e for e in environment.get_first_entity_of_type(OvercookedState).order_queue.visible
+                 if e.name == target),
+                None,
+            )
+            if entry is not None and remaining:
+                fixes = []
+                for fast in MODEL_ORDER:
+                    init, goal = library.facts(build_problem(kitchen, [entry], fast=fast))
+                    for steps in (remaining, relocated(remaining)):
+                        if library.valid(steps, init, goal):
+                            fixes.append(steps)
+                for steps in sorted(fixes, key=lambda st: ticks(kitchen, me, st)):
+                    done = finish(steps, entry)
+                    if done:
+                        return done
+
         now = environment.timestep
+        reserve = []
         for entry in choices:
             dish = _short(entry.name)
             started = time.monotonic()
@@ -390,20 +486,26 @@ class OpenController(Controller):
             if not candidates:
                 continue
             timed = sorted(((ticks(kitchen, me, steps), i) for i, steps in enumerate(candidates)))
-            quickest, index = timed[0]
-            if entry.time_limit is not None and entry is not choices[-1]:
-                left = entry.revealed_at + entry.time_limit - now
-                if left < quickest * SLACK + 3:
-                    continue  # would not make it in time: try the next order
+            quickest = timed[0][0]
+            left = GAME_TICKS - now
+            if entry.time_limit is not None:
+                left = min(left, entry.revealed_at + entry.time_limit - now)
+            if left < quickest * SLACK + 3:
+                # Would not make it in time (the order expires, or the game
+                # ends): try the next order, keeping this one in reserve.
+                if quickest + 2 <= left or not STRICT:
+                    reserve.append((quickest, entry, candidates, timed))
+                continue
             for _, i in timed:
-                chosen = dispatch(
-                    kitchen, candidates[i], Options(solo=True, split_cooks=False, split_plates=False)
-                )
-                plan = DefaultFromPDDL(environment).translate_all(kitchen, chosen, False)
-                plan = [m for m in plan if getattr(m.mutation, "agent_id", chef_id) == chef_id]
-                if plan:
-                    return plan, entry.name
-        return [], None
+                done = finish(candidates[i], entry)
+                if done:
+                    return done
+        for _, entry, candidates, timed in sorted(reserve, key=lambda r: r[0]):
+            for _, i in timed:
+                done = finish(candidates[i], entry)
+                if done:
+                    return done
+        return [], None, [], []
 
     def _choose_orders(self, environment: Environment, chef_id: str) -> list:
         """Orders worth chasing, best first.
@@ -482,11 +584,36 @@ class OpenController(Controller):
                 mine.append(visible[i])
         # Left without an order of our own: race an opponent for one rather
         # than stand idle, but never a teammate.
+        by_id = {a.id: a for a in agents}
+
+        def ahead(i, entry) -> bool:
+            """Whether the chef handed this order is visibly making it: it
+            holds the dish, or made food that no other visible order needs.
+            (A raw bun could be for any burger, so it says little.)"""
+            taker = by_id.get(taken_by.get(i))
+            if not RACE_CHECK or taker is None:
+                return False
+            held = _held_foods(environment, taker)
+            if entry.name in held:
+                return True
+            others = set()
+            for other in visible:
+                if other.name != entry.name:
+                    others |= _components(state, other.name)
+            return any(
+                food in _components(state, entry.name)
+                and food not in others
+                and not state.is_raw_food(food)
+                for food in held
+            )
+
         rest = sorted(
             (
                 entry
                 for i, entry in open_orders
-                if taken_by.get(i) != chef_id and taken_by.get(i) not in mates
+                if taken_by.get(i) != chef_id
+                and taken_by.get(i) not in mates
+                and not ahead(i, entry)
             ),
             key=lambda e: e.reward / EXPECTED_STEPS.get(_short(e.name), DEFAULT_STEPS),
             reverse=True,

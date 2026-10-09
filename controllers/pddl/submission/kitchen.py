@@ -146,7 +146,17 @@ class Kitchen:
 
     def combine(self, first: str, second: str) -> str | None:
         """The legal combine recipe output, ignoring illegal-recipe garbage."""
-        return self.state.get_combine_output(first, second)
+        return self._combine_table.get(frozenset((first, second)))
+
+    @cached_property
+    def _combine_table(self) -> dict[frozenset, str]:
+        # Looked up for every pair of foods when describing the kitchen, so
+        # the recipes are indexed once (the first recipe wins, as in
+        # OvercookedState.get_combine_output).
+        table: dict[frozenset, str] = {}
+        for recipe in self.state.combine_recipes:
+            table.setdefault(frozenset(recipe.ingredients), recipe.output)
+        return table
 
     def legal_accepts(self, food_name: str, equipment_name: str) -> bool:
         """Whether a station takes food that legally leads to its recipes.
