@@ -109,6 +109,8 @@ class Options:
     reorder: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
     exclude: frozenset[str] = frozenset()
+    # Only the chefs the plan names may get jobs (Part 4: one chef each).
+    solo: bool = False
 
 
 def dispatch(
@@ -135,7 +137,10 @@ class _Dispatcher:
             chef_symbol(chef.id): chef
             for chef in kitchen.environment_agents()
             if chef.x is not None
-            and (chef_symbol(chef.id) in plan_chefs or chef.team in teams)
+            and (
+                chef_symbol(chef.id) in plan_chefs
+                or (chef.team in teams and not options.solo)
+            )
             and not (chef_symbol(chef.id) in options.exclude and chef.held_item_id is None)
         }
         self.regions = {

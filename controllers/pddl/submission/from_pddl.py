@@ -255,6 +255,10 @@ class _Translator:
 
     def translate(self, step: PDDLPlanStep) -> list[MutationWithLocation]:
         name, p = step.name, step.parameters
+        if name == "go":
+            # Walking (modelled only in the Part 4 variant) is left to the
+            # controller's path finding.
+            return []
         if name == "cook_by_itself":
             self._touched_stations.add(p[0])
             return []

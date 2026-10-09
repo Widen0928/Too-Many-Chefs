@@ -102,6 +102,9 @@ class Station:
 class Kitchen:
     environment: Environment
     controlled_agent_ids: Collection[str] | None = None
+    # Floor tiles to treat as blocked, such as chefs standing in the way
+    # (Part 4). Empty for Parts 1-3.
+    blocked: frozenset = frozenset()
     # Filled in by __post_init__.
     chefs: list[Agent] = field(default_factory=list)
     reach: dict[str, set[Location]] = field(default_factory=dict)
@@ -189,6 +192,7 @@ class Kitchen:
             for x in range(x0, x0 + b.width)
             for y in range(y0, y0 + b.height)
             if is_walkable(self.environment, x, y, ignore_agents=True)
+            and (x, y) not in self.blocked
         }
 
     def reach_from(self, region: set[Location]) -> set[Location]:
