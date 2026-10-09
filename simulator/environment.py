@@ -8,7 +8,12 @@ from pydantic import Field
 
 from simulator.entities import Entity, EntityModel
 from simulator.models import SimulatorModel
-from simulator.mutations import Mutation, MutationModel, TickMutationModel
+from simulator.mutations import (
+    Mutation,
+    MutationModel,
+    TickMutationModel,
+    limit_actions_per_chef,
+)
 from simulator.mutations.mutation import IllegalMutationError
 
 TEntity = TypeVar("TEntity", bound=Entity)
@@ -37,12 +42,19 @@ class Environment(SimulatorModel):
     entities: dict[str, EntityModel] = Field(default_factory=dict)
     # World effects applied every step, built from the level's rules.
     tick_mutations: list[TickMutationModel] = Field(default_factory=list)
+    # Maximum movements or other actions per chef per step, in addition to one
+    # turn. Set from the level's rules.actions_per_step; None removes the limit.
+    actions_per_step: int | None = 1
 
     def step(self, mutations: Sequence[Mutation | MutationModel]) -> Environment:
-        """Apply mutations in order, then tick mutations, then advance the clock."""
+        """Apply permitted mutations and tick effects, then advance the clock.
+
+        ``limit_actions`` selects and orders the submitted mutations before
+        execution.
+        """
 
         environment = self
-        for mutation in mutations:
+        for mutation in self.limit_actions(mutations):
             try:
                 environment = mutation.run(environment)
             except IllegalMutationError as illegal:
@@ -67,6 +79,18 @@ class Environment(SimulatorModel):
                 state.advance_to_timestep(next_timestep)
             )
         return environment
+
+    def limit_actions(self, mutations: Sequence[Mutation]) -> list[Mutation]:
+        """Return mutations permitted by the kitchen's per-step action limit.
+
+        When ``actions_per_step`` is set, ``limit_actions_per_chef`` retains
+        each chef's first turn and first ``actions_per_step`` movements or
+        other actions, placing turns first. With no limit, all mutations are
+        returned in their original order.
+        """
+        if self.actions_per_step is None:
+            return list(mutations)
+        return limit_actions_per_chef(mutations, self.actions_per_step)
 
     def has_pending_effects(self) -> bool:
         """Return whether a step with no mutations would still change anything."""

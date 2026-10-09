@@ -64,7 +64,10 @@ def load(
     rows = parse_layout_rows(configuration.layout)
 
     environment = (
-        environment.copy_with(tick_mutations=build_tick_mutations(configuration))
+        environment.copy_with(
+            tick_mutations=build_tick_mutations(configuration),
+            actions_per_step=configuration.rules.actions_per_step,
+        )
         .with_entity(build_bounds(configuration, rows))
         .with_entity(build_shadows(configuration))
         .with_entity(build_overcooked_state(configuration))

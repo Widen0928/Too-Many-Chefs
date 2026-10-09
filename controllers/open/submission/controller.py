@@ -6,7 +6,9 @@ others manage the opposing team. ``self.controllable_agents(environment)``
 returns the assigned chef. The remaining chefs are teammates and opponents.
 
 ``get_actions`` receives the full kitchen state once per tick and returns
-actions for the assigned chef. All controllers can observe the full state.
+actions for the assigned chef. Each tick permits one turn followed by one
+movement or other action; additional actions are ignored. All controllers
+can observe the full state.
 Responses must arrive within 200 ms; otherwise, the chef waits for that tick.
 Any technique, including PDDL, is permitted if it uses only packages installed
 by the starter. An exception ends the team's set and records a loss.
@@ -15,7 +17,7 @@ Play a set with your controller on both chefs of one team against the example:
 
     uv run python main.py match --seat . --seat . --seat example --seat example
 
-The placeholder below walks your chef around the kitchen. Replace it.
+Replace the placeholder below, which only moves the chef around the kitchen.
 """
 
 from __future__ import annotations
