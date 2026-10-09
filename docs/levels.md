@@ -9,7 +9,8 @@ Level files are YAML documents with these main sections:
 - `legend`: what each layout symbol means
 - `recipes`: cook and combine recipes
 - `bounds`: optional explicit bounds override
-- `rules`: optional order visibility, ordering, time limits, and timed cooking
+- `rules`: optional order visibility, ordering, time limits, timed cooking,
+  and actions per step
 - `scoring`: optional rewards for order progress and delivery
 - `soundtrack`: optional music played during the level
 
@@ -409,6 +410,19 @@ Infinite mode ignores `order_reveal` and requires at least one entry in
 `state.orders`. An infinite level never finishes on its own, so headless agent
 runs must set `--time-limit`. See `levels/demos/burger_infinite.yaml` for an
 example.
+
+By default, each step permits one turn and one movement or other action per
+chef, equivalent to one keypress in play mode. If a controller submits more,
+the simulator retains each chef's first turn and first action, executes the
+turns first, and discards the excess. This limit is applied before legality
+checks, so a discarded action cannot replace an illegal one.
+`actions_per_step` sets the number of movements or other actions permitted
+per chef. Set it to `null` to remove the limit:
+
+```yaml
+rules:
+  actions_per_step: 2 # defaults to 1; null runs every mutation as sent
+```
 
 Optional scoring rewards completed orders and useful recipe progress:
 
