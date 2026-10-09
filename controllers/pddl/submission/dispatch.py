@@ -103,6 +103,8 @@ class Options:
     split_plates: bool = True
     # Set a plate down by the station after taking food out onto it.
     park_dishes: bool = False
+    # Rewrite tip-losing "storage food onto a dish" steps (see jobs()).
+    keep_tips: bool = False
     # Schedule jobs by their dependencies rather than in plan order.
     reorder: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
@@ -301,6 +303,21 @@ class _Dispatcher:
                     out.append(job)
                     open_jobs[c] = job
             emptied.pop(c, None)
+            if step.name == "take_food_onto_dish" and self.options.keep_tips:
+                spot = self._park_spot(_target(step), index - 0.4, index)
+                if spot is not None:
+                    # Adding storage food straight to a dish earns no tip for
+                    # the new dish; set the plate down by the storage and
+                    # combine onto it instead.
+                    _, loc, food, plate, dish = step.parameters
+                    job.steps.extend([
+                        (index - 0.4, PDDLPlanStep("put_down", (c, spot, plate))),
+                        (index - 0.3, PDDLPlanStep("take_food", (c, loc, food))),
+                        (index - 0.2, PDDLPlanStep(
+                            "food_onto_counter_plate", (c, spot, food, plate, dish))),
+                        (index, PDDLPlanStep("pick_up", (c, spot, dish))),
+                    ])
+                    continue
             job.steps.append((index, step))
             if step.name in END:
                 open_jobs.pop(c, None)

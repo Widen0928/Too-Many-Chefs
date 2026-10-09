@@ -185,6 +185,10 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
     for move in ("any", "off"):
         for split in (True, False):
             yield Options(move_stations=move, split_cooks=split, split_plates=split)
+    if any(step.name == "take_food_onto_dish" for step in steps):
+        # Win back the tips the quick model gives up, if time allows.
+        for split in (True, False):
+            yield Options(split_cooks=split, split_plates=split, keep_tips=True)
     yield Options(move_stations="any", split_cooks=True, split_plates=False)
     yield Options(park_dishes=True)
     yield Options(move_stations="off", park_dishes=True)
