@@ -63,13 +63,13 @@ def main() -> None:
     ctl.OpenController._act = act
     slow = 0
     for t in range(a.ticks):
-        actions = []
+        by_chef: dict[str, list] = {}
         for name, c in controllers.items():
             start = time.monotonic()
             acts = c.get_actions(env, Context())
             dt = time.monotonic() - start
             slow = max(slow, dt)
-            actions.extend(acts)
+            by_chef[name] = list(acts)
             if a.debug and a.start <= t <= a.end:
                 ag = env.get_entity_as(name, Agent) if env.get_entity(name) else None
                 me = [x for x in env.get_entities_of_type(Agent) if x.id == name][0]
@@ -81,8 +81,13 @@ def main() -> None:
                     c._dbg = key
                     st = env.get_first_entity_of_type(OvercookedState)
                     print(t, name, "target", c._target and c._target.split('/')[-1], "plan", len(c._plan), "planning", c._future is not None, "score", st.score, "orders", [(e.name.split('/')[-1], e.revealed_at + (e.time_limit or 0)) for e in st.order_queue.visible])
-        for w in walkers.values():
-            actions.extend(w.get_actions(env, Context()))
+        for wname, w in walkers.items():
+            by_chef[wname] = list(w.get_actions(env, Context()))
+        # The host's order: the sides take turns to go first.
+        from simulator.match.host import _turn_order
+        sides = [[c for c in ("Ada", "Bo") if c in by_chef], [c for c in ("Cyd", "Dev") if c in by_chef]]
+        sides = [side for side in sides if side]
+        actions = [x for chef in _turn_order(sides, env.timestep) for x in by_chef[chef]]
         env = env.step(actions)
         pass
     state = env.get_first_entity_of_type(OvercookedState)

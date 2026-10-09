@@ -72,9 +72,36 @@ def _options(kitchen: Kitchen, step: PDDLPlanStep, reach) -> list:
         found = list(kitchen.bins)
     elif step.name in DELIVERY_STEPS:
         found = list(kitchen.deliveries)
+    elif step.name == "take_plate_infinite":
+        found = [loc for loc, d in kitchen.dispensers.items() if d.infinite_supply]
     else:
         return []
     return [loc for loc in found if loc in reach]
+
+
+def _retargeted(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> list[PDDLPlanStep]:
+    """``steps`` with each storage, plate dispenser, bin and hatch swapped
+    for the nearest equivalent, as the chef walks the plan."""
+    start = (chef.x, chef.y)
+    reach = kitchen.reach.get(chef.id, set())
+    at = None
+    out = []
+    for step in steps:
+        target = _target(step)
+        if target is None:
+            out.append(step)
+            continue
+        options = _options(kitchen, step, reach)
+        if options:
+            best = min(options, key=lambda o: (walk(kitchen, start, at, o), o))
+            if best != target:
+                params = [loc_symbol(best) if p == loc_symbol(target) else p
+                          for p in step.parameters]
+                step = PDDLPlanStep(step.name, tuple(params))
+            target = best
+        out.append(step)
+        at = target
+    return out
 
 
 def walk(kitchen: Kitchen, start, at, target) -> float:
@@ -129,7 +156,7 @@ def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environ
         if index is not None and step.parameters[index] not in used:
             used.append(step.parameters[index])
     if not used:
-        return steps
+        return _retargeted(kitchen, chef, steps)
     fixed = {step.parameters[1] for step in steps if step.name in MOVE_STATION_STEPS}
     reach = kitchen.reach.get(chef.id, set())
     others = {
@@ -193,7 +220,7 @@ def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environ
                     best, mapping, improved = cost, trial, True
         if not improved:
             break
-    return apply(mapping)
+    return _retargeted(kitchen, chef, apply(mapping))
 
 
 # --- Moving --------------------------------------------------------------------

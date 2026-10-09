@@ -40,18 +40,18 @@ from simulator.mutations import Mutation, MutationWithLocation, TurnAgent
 from simulator.mutations.move_agent import MoveAgent
 from simulator.mutations.mutation import can_apply_mutation
 
-# Steps each dish takes one chef in the tournament kitchen, measured with the
-# planner (planning itself costs a few ticks on top).
+# Steps each dish takes one chef in the tournament kitchen: the quickest plan in
+# the library (tools/l4_library.py) plus 15% for other chefs in the way.
 EXPECTED_STEPS = {
-    "coconut_juice": 30,
-    "fruit_salad": 60,
-    "fruit_parfait": 80,
+    "coconut_juice": 23,
+    "fruit_salad": 62,
+    "fruit_parfait": 76,
     "hamburger": 26,
-    "cheeseburger": 42,
-    "fish_and_rice_bowl": 42,
-    "sushi": 48,
-    "chicken_and_chips": 68,
-    "black_forest_cake": 68,
+    "cheeseburger": 37,
+    "fish_and_rice_bowl": 31,
+    "sushi": 42,
+    "chicken_and_chips": 56,
+    "black_forest_cake": 62,
 }
 DEFAULT_STEPS = 60
 # Ticks without progress before the plan is redone.
@@ -73,9 +73,16 @@ PLAN_SECONDS = 3.0
 # longer than the direct way; otherwise the chef waits a few ticks first.
 DETOUR_SLACK = 2
 MAX_WAIT = 8
+BLOCKED_EXTRA = int(__import__("os").environ.get("L4_BLOCKED_EXTRA", "8"))
 # Swap the plan's stations for nearer equivalents.
 RELOCATE = __import__("os").environ.get("L4_RELOCATE", "1") == "1"
 NEW_WALK = __import__("os").environ.get("L4_WALK", "1") == "1"
+USE_LIBRARY = __import__("os").environ.get("L4_LIBRARY", "1") == "1"
+# Local evaluation only (with L4_SYNC): ticks each planner call would cost
+# in a real match, where the host does not wait for the planner.
+CALL_TICKS = int(__import__("os").environ.get("L4_CALL_TICKS", "0"))
+# Matches run slower than the plan's estimate (other chefs in the way).
+SLACK = 1.15
 
 
 def _short(name: str) -> str:
@@ -101,6 +108,9 @@ class OpenController(Controller):
         self._last_held: dict[str, int] = {}
         self._blocked_ticks = 0
         self._waiting = 0
+        self._calls = 0
+        self._hold_until = 0
+        self._held_back = 0
         self._floor: set | None = None
         self._foreign: frozenset = frozenset()
 
@@ -160,6 +170,10 @@ class OpenController(Controller):
                 plan, target = [], None
             self._future = None
             self._plan, self._target = plan, target
+            self._held_back = 0
+            if CALL_TICKS and WAIT_SECONDS is None:
+                self._hold_until = environment.timestep + CALL_TICKS * self._calls
+            self._calls = 0
             self._stuck = 0
             if not plan:
                 # Nothing worth doing right now: look again shortly.
@@ -187,7 +201,7 @@ class OpenController(Controller):
                     return self._act(environment)
                 finally:
                     self._retrying = False
-        if not self._plan:
+        if not self._plan or environment.timestep < self._hold_until:
             return []
         return self._follow(environment, chef)
 
@@ -250,8 +264,16 @@ class OpenController(Controller):
                 actions.append(TurnAgent(agent_id=chef.id, orientation=facing))
             if can_apply_mutation(environment, *actions, mutation):
                 self._plan.pop(0)
+                self._held_back = 0
                 return [*actions, mutation]
-            return actions  # face it and wait (food still cooking, say)
+            # Wait while the food there is still cooking; anything else
+            # (another chef's food in the station we meant to use, say)
+            # will not sort itself out, so plan again.
+            self._held_back += 1
+            if self._held_back > _patience(environment, target):
+                self._held_back = 0
+                self._stuck = STUCK_TICKS + 1
+            return actions
         return self._walk(environment, chef, target)
 
     def _walk(self, environment: Environment, chef: Agent, target) -> list[Mutation]:
@@ -292,63 +314,95 @@ class OpenController(Controller):
             return [_move(chef, position, direct_step)]
         if free_step is None:
             self._blocked_ticks += 1
-            if self._blocked_ticks > BLOCKED_TICKS + MAX_WAIT:
+            if self._blocked_ticks > BLOCKED_TICKS + BLOCKED_EXTRA:
                 self._stuck = STUCK_TICKS + 1  # replan around whoever is in the way
         return []
 
     # --- Planning (background thread) -------------------------------------------
 
     def _make_plan(self, environment: Environment, chef_id: str, blocked=()):
+        """A plan for this chef for the best order it can make now.
+
+        Plans from the library (see library.py) that check out against the
+        kitchen as it is come free; the planner is called when none does,
+        or when food already made in the kitchen could make a better plan.
+        """
         from controllers.pddl.interfaces import PDDLProblem
         from controllers.pddl.solvers import solve_problem_with_logging
 
+        from . import library
         from .planner.dispatch import Options, dispatch
         from .planner.from_pddl import DefaultFromPDDL
-        from .planner.kitchen import Kitchen
+        from .planner.kitchen import Kitchen, chef_symbol
         from .planner.problem_generator import build_domain, build_problem
-
         from .routing import relocate_stations
+        from .schedule import ticks
 
         kitchen = Kitchen(environment, [chef_id], blocked=frozenset(blocked))
         me = next(c for c in kitchen.chefs if c.id == chef_id)
+        c = chef_symbol(chef_id)
         choices = self._choose_orders(environment, chef_id)
-        # Two orders in one plan let the chef fill the time food spends in
-        # the oven or fryer with the next dish; one order is the fallback.
-        groups = [choices[:2]] if ORDERS_PER_PLAN > 1 and len(choices) > 1 else []
-        groups += [[entry] for entry in choices]
-        for group in groups:
-            entry = group[0]
+
+        def relocated(steps):
+            if not RELOCATE:
+                return steps
+            try:
+                return relocate_stations(kitchen, me, steps, environment)
+            except Exception:  # noqa: BLE001 - keep the planner's choice
+                return steps
+
+        now = environment.timestep
+        for entry in choices:
+            dish = _short(entry.name)
             started = time.monotonic()
+            candidates = []
+            problems = {}
             for fast in MODEL_ORDER:
-                problem = PDDLProblem(
-                    domain=build_domain(),
-                    problem=build_problem(kitchen, group, fast=fast),
-                )
-                try:
-                    steps = solve_problem_with_logging(
-                        problem, time_limit_seconds=PLAN_SECONDS
-                    )
-                except Exception:  # noqa: BLE001
-                    steps = []
-                if steps and RELOCATE:
+                text = build_problem(kitchen, [entry], fast=fast)
+                problems[fast] = text
+                if not USE_LIBRARY:
+                    continue
+                init, goal = library.facts(text)
+                for steps in library.plans_for(dish, c):
+                    moved = relocated(steps)
+                    if library.valid(moved, init, goal):
+                        candidates.append(moved)
+                    elif library.valid(steps, init, goal):
+                        candidates.append(steps)
+            if not candidates or _made_food_helps(environment, kitchen, entry, chef_id):
+                for fast in MODEL_ORDER:
+                    self._calls += 1
                     try:
-                        steps = relocate_stations(kitchen, me, steps, environment)
-                    except Exception:  # noqa: BLE001 - keep the planner's choice
-                        pass
-                if steps:
-                    chosen = dispatch(
-                        kitchen,
-                        steps,
-                        Options(solo=True, split_cooks=False, split_plates=False),
-                    )
-                    plan = DefaultFromPDDL(environment).translate_all(
-                        kitchen, chosen, False
-                    )
-                    plan = [m for m in plan if getattr(m.mutation, "agent_id", chef_id) == chef_id]
-                    if plan:
-                        return plan, entry.name
-                if time.monotonic() - started > PLAN_SECONDS:
-                    break
+                        steps = solve_problem_with_logging(
+                            PDDLProblem(domain=build_domain(), problem=problems[fast]),
+                            time_limit_seconds=PLAN_SECONDS,
+                        )
+                    except Exception:  # noqa: BLE001
+                        steps = []
+                    if steps:
+                        # Kept even if it uses food already out: the check
+                        # before any reuse rules out plans that no longer fit.
+                        library.remember(dish, steps, c)
+                        candidates.append(relocated(steps))
+                        break
+                    if time.monotonic() - started > PLAN_SECONDS:
+                        break
+            if not candidates:
+                continue
+            timed = sorted(((ticks(kitchen, me, steps), i) for i, steps in enumerate(candidates)))
+            quickest, index = timed[0]
+            if entry.time_limit is not None and entry is not choices[-1]:
+                left = entry.revealed_at + entry.time_limit - now
+                if left < quickest * SLACK + 3:
+                    continue  # would not make it in time: try the next order
+            for _, i in timed:
+                chosen = dispatch(
+                    kitchen, candidates[i], Options(solo=True, split_cooks=False, split_plates=False)
+                )
+                plan = DefaultFromPDDL(environment).translate_all(kitchen, chosen, False)
+                plan = [m for m in plan if getattr(m.mutation, "agent_id", chef_id) == chef_id]
+                if plan:
+                    return plan, entry.name
         return [], None
 
     def _choose_orders(self, environment: Environment, chef_id: str) -> list:
@@ -448,7 +502,7 @@ class OpenController(Controller):
             if entry.name not in seen:
                 seen.add(entry.name)
                 ordered.append(entry)
-        return ordered[:2]
+        return ordered[:3]
 
 
 # --- Helpers ---------------------------------------------------------------------
@@ -504,6 +558,42 @@ def _next_move(environment: Environment, chef: Agent, target) -> MoveAgent | Non
                 previous[nxt] = tile
                 queue.append(nxt)
     return None
+
+
+def _patience(environment: Environment, target) -> int:
+    """Ticks to wait beside ``target`` for an action to become possible:
+    until food cooking there by itself is done, otherwise two."""
+    from simulator.entities import Equipment
+    from simulator.mutations.cooking import cooking_progress
+
+    wait = 2
+    for item in environment.get_entities_of_type(Equipment):
+        if (item.x, item.y) != tuple(target) or isinstance(item, Plate) or not item.cooks_by_itself:
+            continue
+        progress = cooking_progress(environment, item)
+        if progress is not None and progress < 1:
+            wait = max(wait, round(item.cook_time * (1 - progress)) + 2)
+    return wait
+
+
+def _made_food_helps(environment, kitchen, entry, chef_id) -> bool:
+    """Whether food already made (not raw) that goes into ``entry`` lies in
+    the kitchen, or this chef holds anything: then a fresh plan may use it,
+    which plans from the library never do."""
+    state = environment.get_first_entity_of_type(OvercookedState)
+    wanted = _components(state, entry.name)
+    holders = {
+        a.held_item_id: a.id for a in environment.get_entities_of_type(Agent) if a.held_item_id
+    }
+    me = next(a for a in environment.get_entities_of_type(Agent) if a.id == chef_id)
+    if me.held_item_id is not None:
+        return True
+    for food in environment.get_entities_of_type(Food):
+        if food.name in wanted and not kitchen.is_raw(food.name):
+            holder = holders.get(food.id)
+            if holder is None or holder == chef_id:
+                return True
+    return False
 
 
 def _components(state: OvercookedState, dish: str) -> set[str]:
