@@ -71,6 +71,13 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         horizon = self.horizon or self._strategy_horizon(environment)
+        tips = tip_problem(kitchen)
+        if tips is not None:
+            # No order left can be made: earn the tips the orders on display
+            # still owe, instead of stopping.
+            problem = PDDLProblem(domain=domain, problem=tips)
+            if probe(problem, LATER_PROBE_SECONDS):
+                return problem
         for entries, seconds in goal_sets(kitchen, horizon):
             if not entries:
                 return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
@@ -639,6 +646,122 @@ def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list) ->
         previous = order
     if previous is not None:
         problem.add_fact(f"(next_order {previous} {end})")
+
+
+def tip_problem(kitchen: Kitchen, most: int = 3) -> str | None:
+    """A problem for the tips the orders on display still owe, once none of
+    them can be made and no more are to come; None otherwise.
+
+    Each visible order pays one tip for every food on its recipe that is
+    fetched from a storage or prepared. An order that lacks an ingredient
+    (a cherry, say) cannot be served, but most of its recipe can still be
+    made. The goal is to leave up to ``most`` such foods on free counters,
+    chosen greedily to cover as many owed tips as possible. Only storages
+    (which never run out) are used, never food already in the kitchen, so
+    nothing another order could need is spent.
+    """
+    state = kitchen.state
+    queue = state.order_queue
+    visible = list(queue.visible)
+    if not visible or queue.pending or feasible_orders(kitchen, queued_orders(kitchen)):
+        return None
+    team = next((c.team for c in kitchen.chefs if c.team), None)
+    paid = queue.tipped.get(team or "", {})
+    owed = set()
+    for food in kitchen.food_names:
+        demand = sum(
+            entry.name == food or food in state._order_components(entry.name)
+            for entry in visible
+        )
+        if demand > paid.get(food, 0):
+            owed.add(food)
+    reachable = set().union(*kitchen.reach.values()) if kitchen.reach else set()
+    infinite = {
+        storage.food_name for loc, storage in kitchen.storages.items() if loc in reachable
+    }
+    equipment = {
+        station.name
+        for station in kitchen.stations
+        if station.location in reachable or station.holder is not None
+    }
+    memo: dict[str, frozenset | None] = {}
+
+    def cover(food: str, depth: int = 0) -> frozenset | None:
+        """The owed foods made on the way to ``food`` by its best route, or
+        None if it cannot be made from storages."""
+        if food in memo:
+            return memo[food]
+        if depth > 12:
+            return None
+        memo[food] = None  # guards against recipe loops
+        options = []
+        if food in infinite:
+            options.append(frozenset({food}) & owed)
+        for recipe in state.cook_recipes:
+            if recipe.output == food and recipe.equipment in equipment:
+                inner = cover(recipe.ingredient, depth + 1)
+                if inner is not None:
+                    options.append(inner | (frozenset({food}) & owed))
+        for recipe in state.combine_recipes:
+            if recipe.output != food:
+                continue
+            first, *rest = sorted(recipe.ingredients)
+            a = cover(first, depth + 1)
+            b = cover(rest[0] if rest else first, depth + 1)
+            if a is not None and b is not None:
+                options.append(a | b | (frozenset({food}) & owed))
+        best = max(options, key=len) if options else None
+        memo[food] = best
+        return best
+
+    covers = {}
+    for food in kitchen.food_names:
+        memo.clear()
+        found = cover(food)
+        if found:
+            covers[food] = found
+    free = [
+        loc
+        for loc, counter in sorted(kitchen.counters.items())
+        if loc in reachable and counter.empty(kitchen.environment)
+    ]
+    targets: list[str] = []
+    covered: set = set()
+    while covers and len(targets) < min(most, len(free)):
+        food = max(sorted(covers), key=lambda f: len(covers[f] - covered))
+        if not covers[food] - covered:
+            break
+        targets.append(food)
+        covered |= covers.pop(food)
+    if not targets:
+        return None
+    problem = ProblemBuilder(domain_name="overcooked", problem_name="kitchen")
+    describe_food_and_plates(kitchen, problem)
+    describe_locations(kitchen, problem)
+    describe_chefs(kitchen, problem)
+    describe_counters(kitchen, problem)
+    describe_stations(kitchen, problem)
+    describe_dispensers(kitchen, problem)
+    describe_orders(kitchen, problem, [])
+    text = problem.to_pddl()
+    head = text[: text.index("(:goal")]
+    # Some foods can only be taken out of their station onto a plate, so
+    # each target may stand on its counter loose or on a plate. A target
+    # is kept if the planner can still reach it together with the ones
+    # kept before.
+    goals: list[str] = []
+    for food, loc in zip(targets, free):
+        if loc_symbol(loc) not in problem.objects:
+            continue
+        for item in (food_symbol(food), plate_symbol(food)):
+            trial = goals + [f"(on {item} {loc_symbol(loc)})"]
+            candidate = head + "(:goal (and " + " ".join(trial) + "))\n)\n"
+            if probe(PDDLProblem(domain=build_domain(), problem=candidate), LATER_PROBE_SECONDS):
+                goals = trial
+                break
+    if not goals:
+        return None
+    return head + "(:goal (and " + " ".join(goals) + "))\n)\n"
 
 
 def feasible_orders(kitchen: Kitchen, entries: list) -> list:

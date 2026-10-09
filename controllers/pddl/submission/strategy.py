@@ -24,7 +24,7 @@ from simulator.environment import Environment
 
 _DIR = Path(tempfile.gettempdir()) / "too-many-chefs-strategy"
 # Stop trying further strategies once this many seconds have gone on it.
-SELECTION_SECONDS = 12.0
+SELECTION_SECONDS = 30.0
 
 
 def fingerprint(environment: Environment) -> str:
