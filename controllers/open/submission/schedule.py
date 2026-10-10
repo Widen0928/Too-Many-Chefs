@@ -68,6 +68,44 @@ def ticks(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> float:
     return t
 
 
+def exposure(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> float:
+    """Ticks our food sits in a station while the chef is elsewhere.
+
+    The stations down the middle are shared: food left in one while the
+    chef fetches a plate can be gone when it returns (other chefs' plans
+    happily use whatever is ready). Counts, for each station, the time from
+    putting food in to taking it out when the chef walks off in between.
+    """
+    start = (chef.x, chef.y)
+    reach = kitchen.reach.get(chef.id, set())
+    at = None
+    t = 0.0
+    put: dict[str, tuple[float, int]] = {}
+    moves = 0
+    total = 0.0
+    for step in steps:
+        target = _target(step)
+        if target is None:
+            continue
+        options = _options(kitchen, step, reach)
+        if options:
+            target = min(options, key=lambda o: (walk(kitchen, start, at, o), o))
+        if at is not None and target != at:
+            moves += 1
+        t += walk(kitchen, start, at, target)
+        at = target
+        index = _station_param(step)
+        symbol = step.parameters[index] if index is not None else None
+        if symbol is not None and step.name in TAKE_STEPS and symbol in put:
+            since, moved = put.pop(symbol)
+            if moves > moved:
+                total += t - since
+        if symbol is not None and step.name in PUT_STEPS:
+            put[symbol] = (t, moves)
+        t += 1.0
+    return total
+
+
 def improve(
     kitchen: Kitchen,
     chef,
@@ -76,11 +114,19 @@ def improve(
     goal: list,
     seconds: float = 0.2,
     longest_run: int = 4,
+    guard: float = 0.0,
 ) -> list[PDDLPlanStep]:
-    """``steps`` reordered to finish sooner, still valid from ``init``."""
+    """``steps`` reordered to finish sooner, still valid from ``init``.
+    With ``guard`` > 0, ticks food spends unattended count too (times
+    ``guard``), which favours plans that wait beside the stove."""
     deadline = time.monotonic() + seconds
+
+    def cost(plan):
+        value = ticks(kitchen, chef, plan)
+        return value + guard * exposure(kitchen, chef, plan) if guard else value
+
     best = list(steps)
-    best_t = ticks(kitchen, chef, best)
+    best_t = cost(best)
     improved = True
     while improved and time.monotonic() < deadline:
         improved = False
@@ -93,7 +139,7 @@ def improve(
                     if j == i:
                         continue
                     trial = rest[:j] + run + rest[j:]
-                    t = ticks(kitchen, chef, trial)
+                    t = cost(trial)
                     if t >= best_t - 1e-9 or not valid(trial, init, goal):
                         continue
                     best, best_t, improved = trial, t, True

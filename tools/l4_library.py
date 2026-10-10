@@ -69,7 +69,9 @@ def _job(args):
     for steps in found:
         for variant in (steps, routing.relocate_stations(kitchen, chef, steps, env)):
             better = schedule.improve(kitchen, chef, variant, init, goal, seconds=5)
-            for plan in (variant, better):
+            # Also a version that keeps watch over food in shared stations.
+            guarded = schedule.improve(kitchen, chef, variant, init, goal, seconds=5, guard=1.0)
+            for plan in (variant, better, guarded):
                 if library.valid(plan, init, goal):
                     plans.append(
                         (schedule.ticks(kitchen, chef, plan),
@@ -112,7 +114,7 @@ def main() -> None:
                 if plan not in [p for _, p in library.setdefault(dish, [])]:
                     library[dish].append((t, plan))
     saved = {
-        dish: [plan for _, plan in sorted(plans, key=lambda tp: tp[0])][:12]
+        dish: [plan for _, plan in sorted(plans, key=lambda tp: tp[0])][:16]
         for dish, plans in sorted(library.items())
     }
     OUT.write_text(json.dumps(saved, indent=0))

@@ -89,6 +89,12 @@ EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
 USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
+# Count the teammate in the order auction (right when it runs this code);
+# otherwise only orders it visibly makes are left to it.
+MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
+# Weight of the ticks our food sits unattended in a shared station when
+# choosing between plans (others may take it).
+EXPOSED = float(__import__("os").environ.get("L4_EXPOSED", "0"))
 # Plan around chefs standing in the way; step aside when face to face.
 UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
 # With nothing to do, step off tiles others need.
@@ -429,6 +435,19 @@ class OpenController(Controller):
             # will not sort itself out, so plan again.
             self._held_back += 1
             if self._held_back > _patience(environment, target):
+                if LOG:
+                    from simulator.entities import Equipment
+
+                    step = self._steps[self._step_of[0]] if self._step_of and self._step_of[0] >= 0 and self._steps else None
+                    there = [
+                        (e.name.rsplit("/", 1)[-1], getattr(environment.get_entity(e.held_item_id), "name", None))
+                        for e in environment.get_entities_of_type(Equipment)
+                        if (e.x, e.y) == tuple(target)
+                    ]
+                    held = environment.get_entity(chef.held_item_id) if chef.held_item_id else None
+                    print("LOG", environment.timestep, chef.id, "pat", type(mutation).__name__,
+                          step and step.name, tuple(target), "there", there,
+                          "held", getattr(held, "name", None), flush=True)
                 self._held_back = 0
                 self._why = "patience"
                 self._stuck = STUCK_TICKS + 1
@@ -576,7 +595,7 @@ class OpenController(Controller):
         from .planner.kitchen import Kitchen, chef_symbol
         from .planner.problem_generator import build_domain, build_problem
         from .routing import _retargeted, relocate_stations
-        from .schedule import ticks
+        from .schedule import exposure, ticks
 
         kitchen = Kitchen(environment, [chef_id], blocked=frozenset(blocked))
         me = next(c for c in kitchen.chefs if c.id == chef_id)
@@ -689,7 +708,10 @@ class OpenController(Controller):
                         break
             if not candidates:
                 continue
-            timed = sorted(((ticks(kitchen, me, steps), i) for i, steps in enumerate(candidates)))
+            timed = sorted(
+                (ticks(kitchen, me, steps) + EXPOSED * exposure(kitchen, me, steps), i)
+                for i, steps in enumerate(candidates)
+            )
             quickest = timed[0][0]
             left = GAME_TICKS - now
             if entry.time_limit is not None:
@@ -728,15 +750,25 @@ class OpenController(Controller):
         me_agent = next(a for a in everyone if a.id == chef_id)
         # Goal recognition: a chef that has not carried anything for a while
         # is not cooking, so it will not take an order from anyone.
+        def mate(a) -> bool:
+            return a.id != chef_id and bool(me_agent.team) and a.team == me_agent.team
+
         agents = [
             a
             for a in everyone
             if a.id == chef_id
-            or (me_agent.team and a.team == me_agent.team)
-            or now < 40
-            or now - self._last_held.get(a.id, -999) < 60
+            or (mate(a) and MATE_AUCTION)
+            or (not mate(a) and (now < 40 or now - self._last_held.get(a.id, -999) < 60))
         ]
         visible = list(state.order_queue.visible)
+        # The teammate is someone else's controller: an order is left to it
+        # only when it visibly makes that dish (holds food only that dish
+        # needs), not on a guess that it will.
+        left_to_mates: list[str] = []
+        if not MATE_AUCTION:
+            for a in everyone:
+                if mate(a):
+                    left_to_mates += sorted(_working_on(environment, state, a, visible))
 
         def time_left(entry) -> float:
             if entry.time_limit is None:
@@ -752,10 +784,19 @@ class OpenController(Controller):
                 steps *= 0.6
             return steps
 
+        skipped = list(left_to_mates)
+
+        def leave(entry) -> bool:
+            if entry.name in skipped:
+                skipped.remove(entry.name)  # one order per dish a teammate makes
+                return True
+            return False
+
         open_orders = [
             (i, entry)
             for i, entry in enumerate(visible)
-            if time_left(entry) >= EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
+            if not leave(entry)
+            and time_left(entry) >= EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
             and now - self._failed.get(entry.name, -999) >= 20
         ]
         hatch = next(

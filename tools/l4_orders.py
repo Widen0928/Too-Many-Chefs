@@ -43,6 +43,8 @@ with ThreadPoolExecutor(8) as pool:
         last_why = {}
         for t, chef, kind, *rest in events:
             t = int(t)
+            if chef not in ("Ada", "Bo"):
+                continue
             if kind == "plan":
                 dish = rest[0]
                 if chef in current and current[chef][0] == dish:
