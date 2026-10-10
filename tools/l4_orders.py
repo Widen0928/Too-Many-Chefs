@@ -12,7 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 args = sys.argv[1:]
 folder = args[0]
 base = args[args.index("--base") + 1]
-env = dict(os.environ, L4_SYNC="1", L4_CALL_TICKS="3", L4_LOG="1")
+env = dict(os.environ, L4_SYNC="1", L4_CPU_TICKS="1", L4_LOG="1")
+for setting in args[2:]:
+    if "=" in setting and not setting.startswith("--"):
+        key, value = setting.split("=", 1)
+        env[key] = value
 
 
 def play(level):
@@ -54,7 +58,7 @@ with ThreadPoolExecutor(8) as pool:
                     continue
                 started[dish] += 1
                 current[chef] = (dish, t)
-            elif kind == "ticks":
+            elif kind == "ticks" and chef in ("Ada", "Bo"):
                 for part in rest:
                     k, v = part.split("=")
                     tick_kinds[k] += int(v)

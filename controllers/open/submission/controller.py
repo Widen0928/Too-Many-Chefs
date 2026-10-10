@@ -89,6 +89,8 @@ EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
 USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
+# Plan around chefs standing in the way; step aside when face to face.
+UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
 # With nothing to do, step off tiles others need.
 PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
 # Prefer storages, plate dispensers and bins on our own side.
@@ -197,7 +199,8 @@ class OpenController(Controller):
 
     def shutdown(self) -> None:
         if LOG:
-            print("LOG 0 - ticks", " ".join(f"{k}={v}" for k, v in sorted(self._ticks_by_kind.items())), flush=True)
+            name = next(iter(self.controlled_agent_ids), "-") if getattr(self, "controlled_agent_ids", None) else "-"
+            print("LOG 0", name, "ticks", " ".join(f"{k}={v}" for k, v in sorted(self._ticks_by_kind.items())), flush=True)
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     # --- Each tick ---------------------------------------------------------------
@@ -432,6 +435,19 @@ class OpenController(Controller):
             return actions
         return self._walk(environment, chef, target)
 
+    def _side_step(self, position, ahead, others):
+        """A free tile beside ``position`` other than the one ``ahead``,
+        preferring tiles nobody needs and our own side."""
+        floor = self._floor or set()
+        options = [
+            n for n in _goal_tiles(position)
+            if n in floor and n not in others and n != ahead
+        ]
+        if not options:
+            return None
+        busy = self._busy_tiles or frozenset()
+        return min(options, key=lambda n: (n in busy, n in self._foreign, n))
+
     def _advance(self) -> None:
         self._plan.pop(0)
         if self._step_of:
@@ -499,6 +515,34 @@ class OpenController(Controller):
             return [_move(chef, position, direct_step)]
         if free_step is None:
             self._blocked_ticks += 1
+            blockers = [
+                a
+                for a in environment.get_entities_of_type(Agent)
+                if a.id != chef.id and a.x is not None
+                and ((a.x, a.y) == direct_step or (a.x, a.y) in _goal_tiles(target))
+            ]
+            if (
+                UNJAM
+                and blockers
+                and self._blocked_ticks >= 3
+                and all(self._still.get(a.id, 0) >= PARKED_TICKS for a in blockers)
+            ):
+                # Whoever is in the way has stood still for a while: plan
+                # around them (another storage or station of the kind).
+                self._why = "parked"
+                self._stuck = STUCK_TICKS + 1
+                return []
+            head_on = next((a for a in blockers if (a.x, a.y) == direct_step), None)
+            if (
+                UNJAM
+                and head_on is not None
+                and self._blocked_ticks >= 2
+                and (head_on.team != chef.team or chef.id > head_on.id)
+            ):
+                # Face to face in a corridor: step aside to let them by.
+                side = self._side_step(position, direct_step, others)
+                if side is not None:
+                    return [_move(chef, position, side)]
             if self._blocked_ticks > BLOCKED_TICKS + BLOCKED_EXTRA:
                 self._why = "blocked"
                 self._stuck = STUCK_TICKS + 1  # replan around whoever is in the way
@@ -583,7 +627,7 @@ class OpenController(Controller):
             if entry is not None and remaining:
                 fixes = []
                 for fast in MODEL_ORDER:
-                    init, goal = library.facts(build_problem(kitchen, [entry], fast=fast))
+                    init, goal = library.facts(_problem_text(kitchen, entry, fast, build_problem))
                     for steps in (remaining, relocated(remaining)):
                         if library.valid(steps, init, goal):
                             fixes.append(steps)
@@ -600,7 +644,7 @@ class OpenController(Controller):
             candidates = []
             problems = {}
             for fast in MODEL_ORDER:
-                text = build_problem(kitchen, [entry], fast=fast)
+                text = _problem_text(kitchen, entry, fast, build_problem)
                 problems[fast] = text
                 if not USE_LIBRARY:
                     continue
@@ -866,6 +910,17 @@ def _patience(environment: Environment, target) -> int:
         if progress is not None and progress < 1:
             wait = max(wait, round(item.cook_time * (1 - progress)) + 2)
     return wait
+
+
+def _problem_text(kitchen, entry, fast: bool, build_problem) -> str:
+    """The PDDL problem for ``entry``. The two models differ only in the
+    ``(fast_plating)`` fact, so the kitchen is described once per order."""
+    cache = kitchen.__dict__.setdefault("_problem_texts", {})
+    key = id(entry)
+    if key not in cache:
+        cache[key] = build_problem(kitchen, [entry], fast=True)
+    text = cache[key]
+    return text if fast else text.replace("    (fast_plating)\n", "", 1)
 
 
 def _pruned(problem: str, environment: Environment, dish: str) -> str:
