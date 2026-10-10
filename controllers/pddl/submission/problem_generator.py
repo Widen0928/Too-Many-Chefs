@@ -70,7 +70,14 @@ class DefaultProblemGenerator(ProblemGenerator):
         kitchen = Kitchen(environment, controlled_agent_ids)
         domain = build_domain()
         last: PDDLProblem | None = None
-        horizon = self.horizon or self._strategy_horizon(environment)
+        strategy = self._strategy_horizon(environment)
+        # A strategy is a horizon, or a horizon with "safe": plan with the
+        # tip-keeping model only (slower plans, every tip kept).
+        model_choice = CONFIG.models
+        if isinstance(strategy, str) and strategy.endswith("safe"):
+            model_choice = "safe"
+            strategy = int(strategy[: -len("safe")]) if strategy[: -len("safe")] else None
+        horizon = self.horizon or strategy
         tips = tip_problem(kitchen)
         if tips is not None:
             # No order left can be made: earn the tips the orders on display
@@ -86,14 +93,14 @@ class DefaultProblemGenerator(ProblemGenerator):
             # but tip-losing moves. Each is planned and tried out, and the
             # one that earns more (orders first, then tips, then speed) wins.
             models = {"both": (True, False), "fast": (True,), "safe": (False,)}
-            for fast in models.get(CONFIG.models, (True, False)):
+            for fast in models.get(model_choice, (True, False)):
                 problem = PDDLProblem(
                     domain=domain, problem=build_problem(kitchen, entries, fast=fast)
                 )
                 last = last or problem
                 # The tip-keeping model is much harder to plan in divided
                 # kitchens, so it only gets a short try.
-                limit = seconds if fast or CONFIG.models == "safe" else min(
+                limit = seconds if fast or model_choice == "safe" else min(
                     seconds, CONFIG.tip_safe_seconds
                 )
                 steps = probe(problem, limit)

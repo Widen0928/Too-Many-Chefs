@@ -30,7 +30,7 @@ class Config:
     tip_safe_seconds: float = 6.0
     # Horizons to choose between per level by playing the level out at the
     # start (strategy.py); empty to always use ``horizon``.
-    select_horizons: tuple = (3, 2, 1, None, 4)
+    select_horizons: tuple = (3, 2, 1, "3safe", None, 4)
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
 
