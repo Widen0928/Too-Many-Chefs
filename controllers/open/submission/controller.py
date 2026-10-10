@@ -89,6 +89,10 @@ EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
 USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
+# Leave food teammates put in stations or on counters to them, and read
+# what they are cooking from it.
+RESPECT_MATES = __import__("os").environ.get("L4_RESPECT_MATES", "1") == "1"
+ABANDONED_TICKS = 40
 # Count the teammate in the order auction (right when it runs this code);
 # otherwise only orders it visibly makes are left to it.
 MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
@@ -164,6 +168,12 @@ class OpenController(Controller):
         self._foreign: frozenset = frozenset()
         self._avoid: frozenset = frozenset()
         self._busy_tiles: frozenset | None = None
+        # Who put the food in each station or on each counter (by entity
+        # id), kept while it stays there; food cooking keeps its owner.
+        self._owner: dict[str, str] = {}
+        self._contents: dict[str, str] = {}
+        self._prev_held: dict[str, set] = {}
+        self._owned_since: dict[str, int] = {}
 
     # --- Controller interface -----------------------------------------------
 
@@ -294,7 +304,8 @@ class OpenController(Controller):
             self._plan, self._step_of = [], []
             self._cpu_start = _cpu_now()
             self._future = self._executor.submit(
-                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep
+                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep,
+                self._teammates_things(environment, chef) if RESPECT_MATES else None,
             )
             try:
                 self._future.result(timeout=WAIT_SECONDS)
@@ -361,6 +372,86 @@ class OpenController(Controller):
             else:
                 self._still[agent.id] = 0
             self._seen[agent.id] = where
+        self._track_owners(environment)
+
+    def _track_owners(self, environment: Environment) -> None:
+        """Note who put food into each station or onto each counter: the
+        chef who held it the tick before it appeared there."""
+        from simulator.entities import Counter, Equipment
+
+        agents = list(environment.get_entities_of_type(Agent))
+        held_now: dict[str, set] = {}
+        for a in agents:
+            things = set()
+            if a.held_item_id:
+                things.add(a.held_item_id)
+                inner = environment.get_entity(a.held_item_id)
+                if inner is not None and getattr(inner, "held_item_id", None):
+                    things.add(inner.held_item_id)
+            held_now[a.id] = things
+        for cls in (Equipment, Counter):
+            for container in environment.get_entities_of_type(cls):
+                if isinstance(container, Plate):
+                    continue
+                item = container.held_item_id
+                entity = environment.get_entity(item) if item else None
+                if not isinstance(entity, (Food, Plate)):
+                    self._owner.pop(container.id, None)
+                    self._contents.pop(container.id, None)
+                    continue
+                if container.id not in self._contents:
+                    inside = {item, getattr(entity, "held_item_id", None)}
+                    who = next((a for a, held in self._prev_held.items() if held & inside), None)
+                    if who is None:
+                        # Food changes identity as it is combined: take the
+                        # chef beside the container facing it.
+                        who = next(
+                            (
+                                a.id
+                                for a in agents
+                                if a.x is not None
+                                and _facing((a.x, a.y), (container.x, container.y)) == a.orientation
+                                and abs(a.x - container.x) + abs(a.y - container.y) == 1
+                            ),
+                            None,
+                        )
+                    if who is not None:
+                        self._owner[container.id] = who
+                        self._owned_since[container.id] = environment.timestep
+                self._contents[container.id] = item
+        self._prev_held = held_now
+
+    def _teammates_things(self, environment: Environment, chef: Agent):
+        """What teammates have put down: their stations (as PDDL symbols),
+        their counters, and the ids and names of the food in them."""
+        from .planner.kitchen import loc_symbol, short_name
+
+        mates = {
+            a.id
+            for a in environment.get_entities_of_type(Agent)
+            if a.id != chef.id and chef.team and a.team == chef.team
+        }
+        stations, counters, items, foods = set(), set(), set(), {}
+        for container_id, owner in self._owner.items():
+            if owner not in mates:
+                continue
+            if environment.timestep - self._owned_since.get(container_id, 0) > ABANDONED_TICKS:
+                continue  # left there long ago: free for anyone
+            container = environment.get_entity(container_id)
+            if container is None or container.x is None:
+                continue
+            item = environment.get_entity(container.held_item_id) if container.held_item_id else None
+            inner = environment.get_entity(item.held_item_id) if isinstance(item, Plate) and item.held_item_id else None
+            for thing in (item, inner):
+                if thing is not None:
+                    items.add(thing.id)
+                    if isinstance(thing, Food):
+                        foods.setdefault(owner, set()).add(thing.name)
+            if type(container).__name__ == "Counter":
+                counters.add(loc_symbol((container.x, container.y)))
+            else:
+                stations.add(f"s_{container.x}_{container.y}_{short_name(container.name)}")
+        return frozenset(stations), frozenset(counters), frozenset(items), foods
 
     def _map(self, environment: Environment, chef: Agent) -> None:
         """The floor, and which part of it is the other team's side."""
@@ -579,7 +670,9 @@ class OpenController(Controller):
 
     # --- Planning (background thread) -------------------------------------------
 
-    def _make_plan(self, environment: Environment, chef_id: str, blocked=(), repair=None, keep=None):
+    def _make_plan(
+        self, environment: Environment, chef_id: str, blocked=(), repair=None, keep=None, mates=None
+    ):
         """A plan for this chef for the best order it can make now.
 
         Plans from the library (see library.py) that check out against the
@@ -674,7 +767,9 @@ class OpenController(Controller):
                         candidates.append(moved)
                     elif library.valid(steps, init, goal):
                         candidates.append(steps)
-            if not candidates or _made_food_helps(environment, kitchen, entry, chef_id):
+            if not candidates or _made_food_helps(
+                environment, kitchen, entry, chef_id, mates[2] if mates else frozenset()
+            ):
                 for fast in MODEL_ORDER:
                     steps = []
                     if PRUNE:
@@ -683,7 +778,7 @@ class OpenController(Controller):
                             steps = solve_problem_with_logging(
                                 PDDLProblem(
                                     domain=build_domain(),
-                                    problem=_pruned(problems[fast], environment, entry.name),
+                                    problem=_hide(_pruned(problems[fast], environment, entry.name), mates),
                                 ),
                                 time_limit_seconds=PLAN_SECONDS,
                             )
@@ -693,7 +788,7 @@ class OpenController(Controller):
                         self._calls += 1
                         try:
                             steps = solve_problem_with_logging(
-                                PDDLProblem(domain=build_domain(), problem=problems[fast]),
+                                PDDLProblem(domain=build_domain(), problem=_hide(problems[fast], mates)),
                                 time_limit_seconds=PLAN_SECONDS,
                             )
                         except Exception:  # noqa: BLE001
@@ -766,9 +861,11 @@ class OpenController(Controller):
         # needs), not on a guess that it will.
         left_to_mates: list[str] = []
         if not MATE_AUCTION:
+            put_down = self._teammates_things(environment, me_agent)[3] if RESPECT_MATES else {}
             for a in everyone:
                 if mate(a):
-                    left_to_mates += sorted(_working_on(environment, state, a, visible))
+                    dishes = _working_on(environment, state, a, visible, put_down.get(a.id, set()))
+                    left_to_mates += sorted(dishes)
 
         def time_left(entry) -> float:
             if entry.time_limit is None:
@@ -992,7 +1089,29 @@ def _pruned(problem: str, environment: Environment, dish: str) -> str:
     return "\n".join(lines)
 
 
-def _made_food_helps(environment, kitchen, entry, chef_id) -> bool:
+def _hide(problem: str, mates) -> str:
+    """``problem`` without the stations and counters teammates have put
+    food in: their food is theirs to use, and the planner would happily
+    take it (the opponents' food stays in: taking that is fair game)."""
+    if not mates:
+        return problem
+    stations, counters = mates[0], mates[1]
+    if not stations and not counters:
+        return problem
+    import re
+
+    lines = []
+    for line in problem.split("\n"):
+        tokens = re.findall(r"[^\s()]+", line)
+        if any(token in stations for token in tokens):
+            continue
+        if tokens and tokens[0] == "on" and tokens[-1] in counters:
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _made_food_helps(environment, kitchen, entry, chef_id, ignore=frozenset()) -> bool:
     """Whether food already made (not raw) that goes into ``entry`` lies in
     the kitchen, or this chef holds anything: then a fresh plan may use it,
     which plans from the library never do."""
@@ -1007,6 +1126,8 @@ def _made_food_helps(environment, kitchen, entry, chef_id) -> bool:
     if not USE_MADE:
         return False
     for food in environment.get_entities_of_type(Food):
+        if food.id in ignore:
+            continue
         if food.name in wanted and not kitchen.is_raw(food.name):
             holder = holders.get(food.id)
             if holder is None or holder == chef_id:
@@ -1032,10 +1153,10 @@ def _held_foods(environment: Environment, agent: Agent) -> set[str]:
     return {food.name} if food is not None else set()
 
 
-def _working_on(environment, state, agent: Agent, visible) -> set[str]:
-    """Goal recognition: the visible dishes this chef's held food leads to,
-    if it leads to exactly one of them."""
-    held = _held_foods(environment, agent)
+def _working_on(environment, state, agent: Agent, visible, put_down=frozenset()) -> set[str]:
+    """Goal recognition: the visible dishes the food this chef holds (or
+    has put in a station) leads to, if it leads to exactly one of them."""
+    held = _held_foods(environment, agent) | set(put_down)
     if not held:
         return set()
     dishes = {
