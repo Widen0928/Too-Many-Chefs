@@ -190,6 +190,11 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
         for split in (True, False):
             yield Options(split_cooks=split, split_plates=split, keep_tips=True)
     yield Options(move_stations="any", split_cooks=True, split_plates=False)
+    # Hand out jobs by list scheduling: whichever job can finish soonest
+    # goes next, so an urgent dish is not left waiting behind a later one.
+    if CONFIG.candidates != "noreorder":
+        for split in (True, False):
+            yield Options(reorder=True, split_cooks=split, split_plates=split)
     yield Options(park_dishes=True)
     yield Options(move_stations="off", park_dishes=True)
     yield None
