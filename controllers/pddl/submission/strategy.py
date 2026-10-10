@@ -23,8 +23,11 @@ from pathlib import Path
 from simulator.environment import Environment
 
 _DIR = Path(tempfile.gettempdir()) / "too-many-chefs-strategy"
-# Stop trying further strategies once this many seconds have gone on it.
+# Stop trying further strategies once this many seconds have gone on it
+# (config.selection_seconds), and never start one likely to end after
+# HARD_CAP_SECONDS.
 SELECTION_SECONDS = 30.0
+HARD_CAP_SECONDS = 40.0
 
 
 def fingerprint(environment: Environment) -> str:
@@ -161,13 +164,23 @@ def choose_horizon(environment: Environment, options: list) -> object:
 
     best = None
     started = time.monotonic()
+    longest = 0.0
     for horizon in options:
-        if best is not None and time.monotonic() - started > _selection_seconds():
-            break  # keep the run within its time limit
+        spent = time.monotonic() - started
+        # The server stops a Level 3 run after 90 s (Level 2: 60 s), and the
+        # run itself takes a while: stop once past the budget, or before a
+        # play-out that would likely end past the hard cap.
+        if best is not None and (
+            spent > _selection_seconds() or spent + longest > HARD_CAP_SECONDS
+        ):
+            break
+        began = time.monotonic()
         try:
             score = play_out(environment, horizon)
         except Exception:  # noqa: BLE001 - a failed play-out just loses
             continue
+        finally:
+            longest = max(longest, time.monotonic() - began)
         if best is None or score > best[0]:
             best = (score, horizon)
     chosen = best[1] if best is not None else options[0]
