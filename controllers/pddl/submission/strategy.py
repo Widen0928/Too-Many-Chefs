@@ -77,6 +77,12 @@ def remember(key: str, horizon) -> None:
         pass
 
 
+def _selection_seconds() -> float:
+    from .config import CONFIG
+
+    return CONFIG.selection_seconds
+
+
 def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
     """Play the level from ``environment`` to the end under ``horizon``.
 
@@ -156,7 +162,7 @@ def choose_horizon(environment: Environment, options: list) -> object:
     best = None
     started = time.monotonic()
     for horizon in options:
-        if best is not None and time.monotonic() - started > SELECTION_SECONDS:
+        if best is not None and time.monotonic() - started > _selection_seconds():
             break  # keep the run within its time limit
         try:
             score = play_out(environment, horizon)
