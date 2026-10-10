@@ -107,7 +107,7 @@ _CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
 
 def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
     try:
-        text = canonical(environment) + repr(steps) + repr(CONFIG)
+        text = canonical(environment) + repr(steps) + repr(CONFIG) + repr(REORDER)
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
         return None
@@ -172,6 +172,11 @@ def _cache_put(key: str | None, value) -> None:
         pass
 
 
+# Whether rollouts also try list scheduling; set by the problem generator
+# from the level's strategy (a list so other modules can change it).
+REORDER = [False]
+
+
 def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
     """Ways of handing out the plan's jobs, to be compared by rollout.
 
@@ -192,7 +197,10 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
     yield Options(move_stations="any", split_cooks=True, split_plates=False)
     # Hand out jobs by list scheduling: whichever job can finish soonest
     # goes next, so an urgent dish is not left waiting behind a later one.
-    if CONFIG.candidates != "noreorder":
+    if REORDER[0]:
+        # List scheduling: whichever job can finish soonest goes next, so an
+        # urgent dish is not left waiting behind a later one. Chosen per
+        # level by strategy selection (it helps some kitchens, not others).
         for split in (True, False):
             yield Options(reorder=True, split_cooks=split, split_plates=split)
     yield Options(park_dishes=True)

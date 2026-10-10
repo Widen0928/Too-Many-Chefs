@@ -71,12 +71,21 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
-        # A strategy is a horizon, or a horizon with "safe": plan with the
-        # tip-keeping model only (slower plans, every tip kept).
+        # A strategy is a horizon, possibly with a suffix: "safe" plans with
+        # the tip-keeping model only (slower plans, every tip kept); "r" also
+        # tries list-scheduling the jobs (see from_pddl.candidate_options).
         model_choice = CONFIG.models
-        if isinstance(strategy, str) and strategy.endswith("safe"):
-            model_choice = "safe"
-            strategy = int(strategy[: -len("safe")]) if strategy[: -len("safe")] else None
+        from . import from_pddl as _from_pddl
+
+        _from_pddl.REORDER[0] = False
+        if isinstance(strategy, str):
+            if strategy.endswith("safe"):
+                model_choice = "safe"
+                strategy = strategy[: -len("safe")]
+            elif strategy.endswith("r"):
+                _from_pddl.REORDER[0] = True
+                strategy = strategy[: -len("r")]
+            strategy = int(strategy) if strategy else None
         horizon = self.horizon or strategy
         tips = tip_problem(kitchen)
         if tips is not None:
