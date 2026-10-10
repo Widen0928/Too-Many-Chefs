@@ -33,6 +33,10 @@ MOVE_STATION_STEPS = {
 CROWDED = 4.0
 # Cost of a step onto a tile nearer the other team.
 FOREIGN_COST = 3
+# Extra cost of using a storage, plate dispenser or bin on the other
+# team's side, when there is one on ours (they would be in our way, and
+# we in theirs).
+AVOID_COST = 6.0
 
 
 def neighbours(tile):
@@ -79,9 +83,12 @@ def _options(kitchen: Kitchen, step: PDDLPlanStep, reach) -> list:
     return [loc for loc in found if loc in reach]
 
 
-def _retargeted(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> list[PDDLPlanStep]:
+def _retargeted(
+    kitchen: Kitchen, chef, steps: list[PDDLPlanStep], avoid=frozenset()
+) -> list[PDDLPlanStep]:
     """``steps`` with each storage, plate dispenser, bin and hatch swapped
-    for the nearest equivalent, as the chef walks the plan."""
+    for the nearest equivalent, as the chef walks the plan; those in
+    ``avoid`` (the other team's side) count as further away."""
     start = (chef.x, chef.y)
     reach = kitchen.reach.get(chef.id, set())
     at = None
@@ -93,7 +100,10 @@ def _retargeted(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> list[PDDLP
             continue
         options = _options(kitchen, step, reach)
         if options:
-            best = min(options, key=lambda o: (walk(kitchen, start, at, o), o))
+            best = min(
+                options,
+                key=lambda o: (walk(kitchen, start, at, o) + AVOID_COST * (o in avoid), o),
+            )
             if best != target:
                 params = [loc_symbol(best) if p == loc_symbol(target) else p
                           for p in step.parameters]
@@ -112,9 +122,11 @@ def walk(kitchen: Kitchen, start, at, target) -> float:
     return 30.0 if best is None else float(best)
 
 
-def plan_cost(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], crowded=frozenset()) -> float:
+def plan_cost(
+    kitchen: Kitchen, chef, steps: list[PDDLPlanStep], crowded=frozenset(), avoid=frozenset()
+) -> float:
     """Steps the chef walks and acts for ``steps``, picking the nearest of
-    equivalent storages as it goes (as the dispatcher will)."""
+    equivalent storages as it goes."""
     start = (chef.x, chef.y)
     reach = kitchen.reach.get(chef.id, set())
     at = None
@@ -125,8 +137,11 @@ def plan_cost(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], crowded=frozens
             continue
         options = _options(kitchen, step, reach)
         if options:
-            target = min(options, key=lambda o: (walk(kitchen, start, at, o), o))
-        total += walk(kitchen, start, at, target) + 1
+            target = min(
+                options,
+                key=lambda o: (walk(kitchen, start, at, o) + AVOID_COST * (o in avoid), o),
+            )
+        total += walk(kitchen, start, at, target) + 1 + AVOID_COST * (target in avoid)
         if target in crowded:
             total += CROWDED
         at = target
@@ -145,7 +160,7 @@ def plan_ticks(kitchen: Kitchen, chef, steps: list[PDDLPlanStep]) -> float:
     return ticks
 
 
-def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environment):
+def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environment, avoid=frozenset()):
     """``steps`` with its stations swapped for equivalent empty ones where
     that shortens the walk."""
     from simulator.entities import Agent
@@ -156,7 +171,7 @@ def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environ
         if index is not None and step.parameters[index] not in used:
             used.append(step.parameters[index])
     if not used:
-        return _retargeted(kitchen, chef, steps)
+        return _retargeted(kitchen, chef, steps, avoid)
     fixed = {step.parameters[1] for step in steps if step.name in MOVE_STATION_STEPS}
     reach = kitchen.reach.get(chef.id, set())
     others = {
@@ -206,7 +221,7 @@ def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environ
         return out
 
     mapping = {symbol: symbol for symbol in used}
-    best = plan_cost(kitchen, chef, steps, crowded)
+    best = plan_cost(kitchen, chef, steps, crowded, avoid)
     for _ in range(2):
         improved = False
         for symbol in used:
@@ -215,12 +230,12 @@ def relocate_stations(kitchen: Kitchen, chef, steps: list[PDDLPlanStep], environ
                     continue
                 trial = dict(mapping)
                 trial[symbol] = alt
-                cost = plan_cost(kitchen, chef, apply(trial), crowded)
+                cost = plan_cost(kitchen, chef, apply(trial), crowded, avoid)
                 if cost < best - 0.5:
                     best, mapping, improved = cost, trial, True
         if not improved:
             break
-    return _retargeted(kitchen, chef, apply(mapping))
+    return _retargeted(kitchen, chef, apply(mapping), avoid)
 
 
 # --- Moving --------------------------------------------------------------------

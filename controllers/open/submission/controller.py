@@ -89,6 +89,10 @@ EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
 USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
+# With nothing to do, step off tiles others need.
+PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
+# Prefer storages, plate dispensers and bins on our own side.
+AVOID = __import__("os").environ.get("L4_AVOID", "1") == "1"
 # Plan with only the foods that matter for the dish (much quicker), and
 # what that costs in a match (ticks, for local evaluation).
 PRUNE = __import__("os").environ.get("L4_PRUNE", "1") == "1"
@@ -107,6 +111,17 @@ SLACK = 1.15
 
 def _short(name: str) -> str:
     return name.rsplit("/", 1)[-1]
+
+
+CPU_TICKS = __import__("os").environ.get("L4_CPU_TICKS") == "1"
+
+
+def _cpu_now() -> float:
+    """CPU seconds used by this process and the planners it has run."""
+    import resource
+
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return time.process_time() + children.ru_utime + children.ru_stime
 
 
 class OpenController(Controller):
@@ -139,6 +154,8 @@ class OpenController(Controller):
         self._ticks_by_kind: dict[str, int] = {}
         self._floor: set | None = None
         self._foreign: frozenset = frozenset()
+        self._avoid: frozenset = frozenset()
+        self._busy_tiles: frozenset | None = None
 
     # --- Controller interface -----------------------------------------------
 
@@ -217,7 +234,14 @@ class OpenController(Controller):
             self._plan, self._target = plan, target
             self._steps, self._step_of = steps, step_of
             self._held_back = 0
-            if CALL_TICKS and WAIT_SECONDS is None:
+            if CPU_TICKS and WAIT_SECONDS is None:
+                # Local evaluation: the ticks a match would lose while this
+                # plan was made (the host waits 120 ms of each 130 ms tick).
+                import math
+
+                cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
+                self._hold_until = environment.timestep + max(0, math.ceil((cost - 0.12) / 0.13))
+            elif CALL_TICKS and WAIT_SECONDS is None:
                 self._hold_until = environment.timestep + round(CALL_TICKS * self._calls)
             self._calls = 0
             self._stuck = 0
@@ -259,6 +283,7 @@ class OpenController(Controller):
             # fails.
             keep = self._target if self._plan and self._target in visible and STICKY else None
             self._plan, self._step_of = [], []
+            self._cpu_start = _cpu_now()
             self._future = self._executor.submit(
                 self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep
             )
@@ -272,9 +297,49 @@ class OpenController(Controller):
                     return self._act(environment)
                 finally:
                     self._retrying = False
+        if not self._plan and self._future is None and PARK:
+            return self._park(environment, chef)
         if not self._plan or environment.timestep < self._hold_until:
             return []
         return self._follow(environment, chef)
+
+    def _park(self, environment: Environment, chef: Agent) -> list[Mutation]:
+        """With nothing to do, step off any tile others need to reach a
+        storage, plate dispenser, hatch, bin or station."""
+        from simulator.entities import Bin, Equipment, PlateDispenser, Storage
+
+        if self._busy_tiles is None:
+            self._busy_tiles = frozenset(
+                n
+                for cls in (Storage, PlateDispenser, Delivery, Bin, Equipment)
+                for e in environment.get_entities_of_type(cls)
+                if e.x is not None and not isinstance(e, Plate)
+                for n in _goal_tiles((e.x, e.y))
+            )
+        position = (chef.x, chef.y)
+        if position not in self._busy_tiles:
+            return []
+        others = {
+            (a.x, a.y)
+            for a in environment.get_entities_of_type(Agent)
+            if a.id != chef.id and a.x is not None
+        }
+        floor = self._floor or set()
+        # Breadth-first to the nearest free tile on our side that nobody
+        # needs to stand on.
+        previous = {position: None}
+        queue = deque([position])
+        while queue:
+            tile = queue.popleft()
+            if tile not in self._busy_tiles and tile not in self._foreign and tile != position:
+                while previous[tile] != position:
+                    tile = previous[tile]
+                return [_move(chef, position, tile)]
+            for n in _goal_tiles(tile):
+                if n in floor and n not in others and n not in previous:
+                    previous[n] = tile
+                    queue.append(n)
+        return []
 
     def _watch(self, environment: Environment) -> None:
         """Count how long each chef has stood on the same tile."""
@@ -308,6 +373,19 @@ class OpenController(Controller):
             ours = [(a.x, a.y) for a in agents if a.team == chef.team]
             theirs = [(a.x, a.y) for a in agents if a.team != chef.team]
             self._foreign = foreign_tiles(self._floor, ours, theirs)
+            if AVOID and self._foreign:
+                from simulator.entities import Bin, PlateDispenser, Storage
+
+                self._avoid = frozenset(
+                    (e.x, e.y)
+                    for cls in (Storage, PlateDispenser, Bin)
+                    for e in environment.get_entities_of_type(cls)
+                    if all(
+                        n in self._foreign
+                        for n in _goal_tiles((e.x, e.y))
+                        if n in self._floor
+                    )
+                )
 
     def _parked(self, environment: Environment, chef_id: str) -> set:
         """Tiles of other chefs that have not moved for a while: plan around them."""
@@ -424,6 +502,16 @@ class OpenController(Controller):
             if self._blocked_ticks > BLOCKED_TICKS + BLOCKED_EXTRA:
                 self._why = "blocked"
                 self._stuck = STUCK_TICKS + 1  # replan around whoever is in the way
+        if LOG and self._waiting % 4 == 1:
+            who = [
+                (a.id, "mate" if a.team == chef.team else "opp", self._still.get(a.id, 0),
+                 "held" if a.held_item_id else "empty")
+                for a in environment.get_entities_of_type(Agent)
+                if (a.x, a.y) == direct_step
+                or (a.x, a.y) in [n for n in _goal_tiles(target) if n != position]
+            ]
+            print("LOG", environment.timestep, chef.id, "blk", position, tuple(target),
+                  "free", free_cost, "direct", direct_cost, "by", who, flush=True)
         return []
 
     # --- Planning (background thread) -------------------------------------------
@@ -443,7 +531,7 @@ class OpenController(Controller):
         from .planner.from_pddl import _Translator as _translator
         from .planner.kitchen import Kitchen, chef_symbol
         from .planner.problem_generator import build_domain, build_problem
-        from .routing import relocate_stations
+        from .routing import _retargeted, relocate_stations
         from .schedule import ticks
 
         kitchen = Kitchen(environment, [chef_id], blocked=frozenset(blocked))
@@ -461,7 +549,7 @@ class OpenController(Controller):
             if not RELOCATE:
                 return steps
             try:
-                return relocate_stations(kitchen, me, steps, environment)
+                return relocate_stations(kitchen, me, steps, environment, self._avoid)
             except Exception:  # noqa: BLE001 - keep the planner's choice
                 return steps
 
@@ -469,6 +557,10 @@ class OpenController(Controller):
 
         def finish(steps, entry):
             chosen = dispatch(kitchen, steps, options)
+            if self._avoid:
+                # The dispatcher picks the nearest storage, the top one on a
+                # tie: keep to our own side instead.
+                chosen = _retargeted(kitchen, me, chosen, self._avoid)
             translator = _translator(kitchen)
             plan, step_of = [], []
             for index, step in enumerate(chosen):
@@ -701,6 +793,11 @@ class OpenController(Controller):
 
 
 # --- Helpers ---------------------------------------------------------------------
+
+
+def _goal_tiles(target):
+    x, y = target
+    return [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
 
 
 def _move(chef: Agent, position, tile) -> MoveAgent:
