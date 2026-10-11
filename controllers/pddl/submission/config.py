@@ -37,7 +37,8 @@ class Config:
     selection_seconds: float = 30.0
     # When the best plan lets an order expire, also try plans that leave the
     # most urgent order out or serve the next one first.
-    deadline_alternatives: bool = False
+    deadline_alternatives: bool = True
+    deadline_kinds: tuple = ("swap",)
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
 

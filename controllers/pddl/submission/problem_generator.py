@@ -129,15 +129,22 @@ class DefaultProblemGenerator(ProblemGenerator):
                 # The best plan lets an order expire: also try leaving out
                 # the most urgent order (it may be lost anyway) and serving
                 # the next one first, and keep whichever rolls out best.
-                for dropped, alternative in (
-                    (entries[0], entries[1:]),
-                    (None, [entries[1], entries[0], *entries[2:]]),
+                import sys
+
+                for kind, dropped, alternative in (
+                    ("leave-out", entries[0], entries[1:]),
+                    ("swap", None, [entries[1], entries[0], *entries[2:]]),
                 ):
+                    if kind not in CONFIG.deadline_kinds:
+                        continue
+                    if kind == "swap" and entries[1] not in kitchen.state.order_queue.visible:
+                        continue  # the next order is not on display yet
                     problem = PDDLProblem(
                         domain=domain, problem=build_problem(kitchen, alternative, fast=True)
                     )
                     steps = probe(problem, LATER_PROBE_SECONDS)
                     if not steps:
+                        print(f"[tmc] t={environment.timestep} {kind}: no plan", file=sys.stderr)
                         continue
                     score = evaluate(environment, steps)
                     if dropped is not None and len(score) > 1:
@@ -145,7 +152,11 @@ class DefaultProblemGenerator(ProblemGenerator):
                         # rollout ends: count it as lost, or leaving it out
                         # would look better than it is.
                         score = (score[0], score[1] - dropped.reward, *score[2:])
-                    if score > best[0]:
+                    chosen = score > best[0]
+                    print(f"[tmc] t={environment.timestep} {kind}: played out {score} "
+                          f"vs plan {best[0]} -> {'chosen' if chosen else 'kept plan'}",
+                          file=sys.stderr)
+                    if chosen:
                         best = (score, problem, _from_pddl.LAST_EXPIRED[0])
             if best is not None:
                 return best[1]
