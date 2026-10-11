@@ -30,15 +30,23 @@ class Config:
     tip_safe_seconds: float = 6.0
     # Horizons to choose between per level by playing the level out at the
     # start (strategy.py); empty to always use ``horizon``.
-    select_horizons: tuple = (3, "3r", 2, None, 1, "2r", "3safe", 4, "1r", "r", "4r")
+    select_horizons: tuple = (3, "3r", 2, None, "3w", 1, "2r", "3safe", "2w", 4, "1r", "r", "4r")
     # Seconds strategy selection may spend playing the level out. The
     # server stops a level after 60 s (Level 2) or 90 s (Level 3), and the
     # run itself needs time too, so this stays well inside.
     selection_seconds: float = 30.0
+    # Once a full trial reaches a conservative ceiling on remaining points,
+    # further strategies cannot improve the grade.
+    stop_at_score_bound: bool = True
     # When the best plan lets an order expire, also try plans that leave the
     # most urgent order out or serve the next one first.
-    deadline_alternatives: bool = True
+    # Experimental: a partial-plan rollout cannot account for the replan
+    # triggered when an order expires. Keep the verified baseline by default.
+    deadline_alternatives: bool = False
     deadline_kinds: tuple = ("swap",)
+    # Compare swap-enabled policies only after the existing whole-level
+    # candidates, within the same selection budget.
+    select_deadline_alternatives: bool = False
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
 

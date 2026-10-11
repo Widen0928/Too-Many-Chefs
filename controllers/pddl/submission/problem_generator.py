@@ -35,6 +35,17 @@ from .kitchen import (
 DOMAIN_PATH = Path(__file__).with_name("overcooked.pddl")
 
 
+def can_swap_orders(kitchen: Kitchen, entries: list) -> bool:
+    """Visibility alone does not permit serving strict-order tickets early."""
+    queue = kitchen.state.order_queue
+    return (
+        len(entries) >= 2
+        and queue.order_reveal == "all"
+        and not queue.strict_ordering
+        and all(entry in queue.visible for entry in entries[:2])
+    )
+
+
 class DefaultProblemGenerator(ProblemGenerator):
     """Build problems, and replan when the orders change or the kitchen stalls."""
 
@@ -71,6 +82,12 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
+        deadline_alternatives = CONFIG.deadline_alternatives
+        if isinstance(strategy, str) and strategy.endswith(("swap", "w")):
+            # This switch belongs to the selected whole-level policy, so it
+            # follows the remembered strategy into every planning worker.
+            deadline_alternatives = True
+            strategy = strategy[:-4] if strategy.endswith("swap") else strategy[:-1]
         # A strategy is a horizon, possibly with a suffix: "safe" plans with
         # the tip-keeping model only (slower plans, every tip kept); "r" also
         # tries list-scheduling the jobs (see from_pddl.candidate_options).
@@ -125,7 +142,7 @@ class DefaultProblemGenerator(ProblemGenerator):
                 score = evaluate(environment, steps)
                 if best is None or score >= best[0]:
                     best = (score, problem, _from_pddl.LAST_EXPIRED[0])
-            if best is not None and best[2] and len(entries) >= 2 and CONFIG.deadline_alternatives:
+            if best is not None and best[2] and len(entries) >= 2 and deadline_alternatives:
                 # The best plan lets an order expire: also try leaving out
                 # the most urgent order (it may be lost anyway) and serving
                 # the next one first, and keep whichever rolls out best.
@@ -137,8 +154,8 @@ class DefaultProblemGenerator(ProblemGenerator):
                 ):
                     if kind not in CONFIG.deadline_kinds:
                         continue
-                    if kind == "swap" and entries[1] not in kitchen.state.order_queue.visible:
-                        continue  # the next order is not on display yet
+                    if kind == "swap" and not can_swap_orders(kitchen, entries):
+                        continue  # both orders must be independently deliverable
                     problem = PDDLProblem(
                         domain=domain, problem=build_problem(kitchen, alternative, fast=True)
                     )

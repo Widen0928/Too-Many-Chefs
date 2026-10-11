@@ -9,8 +9,8 @@ the very same planner, dispatcher, navigation policy and simulator, and keep
 the strategy that scores best.
 
 The choice is made on the first planning call and remembered on disk, keyed
-by the kitchen's fixed layout, because every planning call runs in a worker
-process with its own copy of the problem generator.
+by the episode's stable state id and layout, because every planning call
+runs in a worker process with its own copy of the problem generator.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ HARD_CAP_SECONDS = 40.0
 
 
 def fingerprint(environment: Environment) -> str:
-    """A key for the level: its name and everything that never moves."""
+    """A stable key shared by this episode's workers, never by another run."""
     from simulator.entities import (
         Bin,
         Counter,
@@ -43,7 +43,7 @@ def fingerprint(environment: Environment) -> str:
     )
 
     state = environment.get_first_entity_of_type(OvercookedState)
-    parts: list[str] = [state.name or "" if state else ""]
+    parts: list[str] = [state.name or "" if state else "", state.id if state else ""]
     for cls in (Counter, Storage, Delivery, Bin, Sink, PlateDispenser):
         for entity in environment.get_entities_of_type(cls):
             extra = getattr(entity, "food_name", "")
@@ -54,15 +54,11 @@ def fingerprint(environment: Environment) -> str:
 
 
 def _code_version() -> str:
-    """The submission's own source and settings, so a stale choice made by
-    an older version of the code is never reused."""
+    """Include the simulation rules used to compare strategies."""
     from .config import CONFIG
+    from .from_pddl import _cache_namespace
 
-    digest = hashlib.sha256(repr(CONFIG).encode())
-    for path in sorted(Path(__file__).parent.glob("*.p*")):
-        if path.suffix in (".py", ".pddl"):
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
+    return hashlib.sha256((repr(CONFIG) + _cache_namespace()).encode()).hexdigest()
 
 
 def remembered(key: str):
@@ -110,6 +106,7 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
     env = environment
     start = env.get_first_entity_of_type(OvercookedState).score
     plans = None
+    replan_due = False
     idle_calls = 0
     agent_ids = [
         a.id
@@ -122,16 +119,22 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
         state = env.get_first_entity_of_type(OvercookedState)
         if not state.visible_orders and not state.order_queue.pending:
             break
-        if plans is not None and generator.should_replan(env):
+        if plans is not None:
+            # should_replan may consume the event that triggered it. Keep
+            # the request until a carried station is put down, exactly as
+            # PDDLController does in the real run.
+            if generator.should_replan(env):
+                replan_due = True
             carrying = any(
                 isinstance(env.get_entity(a.held_item_id), Equipment)
                 and not isinstance(env.get_entity(a.held_item_id), Plate)
                 for a in env.get_entities_of_type(Agent)
                 if a.held_item_id
             )
-            if not carrying:
+            if replan_due and not carrying:
                 plans = None
                 policy = DefaultMutationInterpolationPolicy()
+                replan_due = False
         if plans is None:
             steps = solve_problem_with_logging(generator.to_pddl(env))
             mutations = DefaultFromPDDL(env).from_pddl(steps)
@@ -160,17 +163,14 @@ def choose_horizon(environment: Environment, options: list) -> object:
     known = remembered(key)
     if known != "missing":
         return known
+    import sys
     import time
 
-    import sys
+    from .config import CONFIG
+    from .score_bound import remaining_score_upper_bound
 
-    if _rush(environment):
-        # Orders revealed one at a time, or one due very soon (a rush
-        # ticket): list scheduling earned full points on such a kitchen, so
-        # its strategies are played out first.
-        options = [o for o in RUSH_FIRST if o in options or o == "3safer"] + [
-            o for o in options if o not in RUSH_FIRST
-        ]
+    score_bound = remaining_score_upper_bound(environment) if CONFIG.stop_at_score_bound else None
+    options = strategy_options(environment, options)
     print(f"[tmc] strategy options {options}", file=sys.stderr, flush=True)
     best = None
     started = time.monotonic()
@@ -195,6 +195,10 @@ def choose_horizon(environment: Environment, options: list) -> object:
               file=sys.stderr, flush=True)
         if best is None or score > best[0]:
             best = (score, horizon)
+        if score_bound is not None and best[0][0] >= score_bound:
+            print(f"[tmc] reached remaining-score bound {score_bound}",
+                  file=sys.stderr, flush=True)
+            break
     chosen = best[1] if best is not None else options[0]
     print(f"[tmc] strategy chosen {chosen!r} after {time.monotonic() - started:.1f}s",
           file=sys.stderr, flush=True)
@@ -204,6 +208,32 @@ def choose_horizon(environment: Environment, options: list) -> object:
 
 # Played out first on rush levels (see choose_horizon).
 RUSH_FIRST = ("3r", "2r", "1r", "3safer", "r", 3, 2)
+
+
+def strategy_options(environment: Environment, options: list) -> list:
+    """Keep baseline coverage before comparing optional whole-run swaps."""
+    from simulator.entities import OvercookedState
+
+    from .config import CONFIG
+
+    options = list(options)
+    if _rush(environment):
+        options = [o for o in RUSH_FIRST if o in options or o == "3safer"] + [
+            o for o in options if o not in RUSH_FIRST
+        ]
+    queue = environment.get_first_entity_of_type(OvercookedState).order_queue
+    if (
+        CONFIG.select_deadline_alternatives
+        and not CONFIG.deadline_alternatives
+        and queue.order_reveal == "all"
+        and not queue.strict_ordering
+        and len(queue.visible) >= 2
+        and any(entry.time_limit is not None for entry in queue.visible)
+    ):
+        for candidate in ("3swap", "3rswap", "2rswap"):
+            if candidate not in options:
+                options.append(candidate)
+    return options
 
 
 def _rush(environment: Environment) -> bool:

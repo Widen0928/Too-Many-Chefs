@@ -16,11 +16,14 @@ food out waits for it to be ready.
 from __future__ import annotations
 
 import hashlib
+import json
 import pickle
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 from controllers.pddl.interfaces import FromPDDL, PDDLPlanStep
+from simulator.entities import Food
 from simulator.entities.plate import PLATE_NAME
 from simulator.environment import Environment
 from simulator.mutations import (
@@ -36,7 +39,6 @@ from simulator.mutations import (
 )
 from simulator.mutations.agent_mutation import AgentMutation
 from simulator.mutations.cooking import current_timer
-from simulator.entities import Food
 
 from .config import CONFIG
 from .dispatch import Options, dispatch
@@ -110,9 +112,51 @@ class DefaultFromPDDL(FromPDDL):
 _CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
 
 
+@lru_cache(maxsize=1)
+def _cache_namespace() -> str:
+    """Invalidate outcomes when planning or simulator semantics change.
+
+    Read source once per worker, rather than on every candidate rollout. Both
+    planning workers share this namespace, but another checkout/version cannot
+    reuse outcomes computed with different navigation or scoring rules.
+    """
+    submission = Path(__file__).resolve().parent
+    # The tournament copy lives one directory deeper in open/submission/planner.
+    root = next(parent for parent in submission.parents if (parent / "simulator").is_dir())
+    paths = {
+        *submission.glob("*.py"),
+        *submission.glob("*.pddl"),
+        *(root / "simulator").rglob("*.py"),
+        *(root / "controllers" / "navigation").rglob("*.py"),
+        root / "controllers" / "pddl" / "controller.py",
+    }
+    digest = hashlib.sha256(b"rollout-cache-v2")
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _canonical_json(value) -> str:
+    """Keep set-valued rules stable across worker PYTHONHASHSEED values."""
+    def ordered(item):
+        if isinstance(item, dict):
+            return {key: ordered(value) for key, value in item.items()}
+        if isinstance(item, (set, frozenset)):
+            return sorted((ordered(value) for value in item), key=lambda value: json.dumps(value, sort_keys=True))
+        if isinstance(item, (list, tuple)):
+            return [ordered(value) for value in item]
+        return item
+
+    return json.dumps(ordered(value), sort_keys=True, separators=(",", ":"))
+
+
 def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
     try:
-        text = canonical(environment) + repr(steps) + repr(CONFIG) + repr(REORDER[0])
+        text = (
+            _cache_namespace() + canonical(environment) + repr(steps)
+            + repr(CONFIG) + repr(REORDER[0])
+        )
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
         return None
@@ -123,6 +167,26 @@ def canonical(environment: Environment) -> str:
     created during a run (so a played-out run and the real one match)."""
     from simulator.entities import Entity, OvercookedState
 
+    # Include action/scoring properties, while excluding random entity ids and
+    # purely visual fields such as a chef's random bob_offset.
+    properties = {
+        "name", "dirty", "raw", "deliverable", "food_name", "infinite_supply",
+        "requires", "can_pick_up", "can_process_food", "cook_time",
+        "cooks_by_itself", "last_cooked_at", "plate_count", "dirty_plate_count",
+        "width", "height", "team", "accepted_item_names", "returns_dirty",
+    }
+
+    def semantics(entity) -> str:
+        data = entity.model_dump(mode="python", include=properties)
+        cooking = getattr(entity, "cooking", None)
+        if cooking is not None:
+            data["cooking"] = {
+                "elapsed": cooking.elapsed,
+                "started_by": cooking.started_by,
+                "matches_held_item": cooking.food_id == entity.held_item_id,
+            }
+        return _canonical_json(data)
+
     def describe(entity_id: str | None, depth: int = 0) -> str:
         if entity_id is None or depth > 3:
             return "-"
@@ -130,30 +194,31 @@ def canonical(environment: Environment) -> str:
         if entity is None:
             return "?"
         held = getattr(entity, "held_item_id", None)
-        return f"{getattr(entity, 'name', '')}/{getattr(entity, 'dirty', '')}[{describe(held, depth + 1)}]"
+        return f"{type(entity).__name__}:{semantics(entity)}[{describe(held, depth + 1)}]"
 
     rows = []
     for entity in environment.get_entities_of_type(Entity):
         if isinstance(entity, OvercookedState):
-            queue = entity.order_queue
-            rows.append(
-                f"Q{[(e.name, e.revealed_at, e.time_limit, e.reward) for e in queue.visible]}"
-                f"{[(e.name, e.time_limit) for e in queue.pending]}"
-                f"{queue.delivered_count},{queue.expired_count},{entity.score}"
-            )
+            # Paid tips and pending rewards affect future points even when
+            # total score, visible orders and the physical kitchen are equal.
+            data = entity.model_dump(mode="python", include={
+                "order_queue", "scoring", "food_definitions", "cook_recipes",
+                "combine_recipes", "allow_illegal_recipes",
+            })
+            rows.append("Q" + _canonical_json(data))
             continue
         x, y = getattr(entity, "x", None), getattr(entity, "y", None)
         if x is None:
             continue
-        cooking = getattr(entity, "cooking", None)
         rows.append(
-            f"{type(entity).__name__}@{x},{y}:{getattr(entity, 'name', '')}"
+            f"{type(entity).__name__}@{x},{y}:{semantics(entity)}"
             f":{getattr(entity, 'orientation', '')}:{describe(getattr(entity, 'held_item_id', None))}"
-            f":{cooking.elapsed if cooking else ''}"
-            f":{getattr(entity, 'plate_count', '')},{getattr(entity, 'dirty_plate_count', '')}"
             f":{getattr(entity, 'id', '') if type(entity).__name__ == 'Agent' else ''}"
         )
-    return f"t{environment.timestep}|" + "|".join(sorted(rows))
+    rules = _canonical_json(environment.model_dump(
+        mode="python", include={"actions_per_step", "tick_mutations"},
+    ))
+    return f"t{environment.timestep}|rules:{rules}|" + "|".join(sorted(rows))
 
 
 def _cache_get(key: str | None):
@@ -199,7 +264,7 @@ def _reorder_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    on = isinstance(chosen, str) and chosen.endswith("r")
+    on = isinstance(chosen, str) and chosen.removesuffix("swap").removesuffix("w").endswith("r")
     if not _ANNOUNCED:
         _ANNOUNCED.append(True)
         import sys
