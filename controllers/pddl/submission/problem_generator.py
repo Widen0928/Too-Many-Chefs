@@ -124,7 +124,29 @@ class DefaultProblemGenerator(ProblemGenerator):
                     continue
                 score = evaluate(environment, steps)
                 if best is None or score >= best[0]:
-                    best = (score, problem)
+                    best = (score, problem, _from_pddl.LAST_EXPIRED[0])
+            if best is not None and best[2] and len(entries) >= 2 and CONFIG.deadline_alternatives:
+                # The best plan lets an order expire: also try leaving out
+                # the most urgent order (it may be lost anyway) and serving
+                # the next one first, and keep whichever rolls out best.
+                for dropped, alternative in (
+                    (entries[0], entries[1:]),
+                    (None, [entries[1], entries[0], *entries[2:]]),
+                ):
+                    problem = PDDLProblem(
+                        domain=domain, problem=build_problem(kitchen, alternative, fast=True)
+                    )
+                    steps = probe(problem, LATER_PROBE_SECONDS)
+                    if not steps:
+                        continue
+                    score = evaluate(environment, steps)
+                    if dropped is not None and len(score) > 1:
+                        # The order left out still expires, only after the
+                        # rollout ends: count it as lost, or leaving it out
+                        # would look better than it is.
+                        score = (score[0], score[1] - dropped.reward, *score[2:])
+                    if score > best[0]:
+                        best = (score, problem, _from_pddl.LAST_EXPIRED[0])
             if best is not None:
                 return best[1]
         return last or PDDLProblem(domain=domain, problem=build_problem(kitchen, []))

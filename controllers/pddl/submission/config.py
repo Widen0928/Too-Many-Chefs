@@ -35,6 +35,9 @@ class Config:
     # server stops a level after 60 s (Level 2) or 90 s (Level 3), and the
     # run itself needs time too, so this stays well inside.
     selection_seconds: float = 30.0
+    # When the best plan lets an order expire, also try plans that leave the
+    # most urgent order out or serve the next one first.
+    deadline_alternatives: bool = False
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
 

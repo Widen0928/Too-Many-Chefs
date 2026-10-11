@@ -64,7 +64,8 @@ class DefaultFromPDDL(FromPDDL):
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
-            key, chosen = cached
+            key, chosen, *rest = cached
+            LAST_EXPIRED[0] = rest[0] if rest else 0
             return key, self.translate_all(kitchen, chosen, left_out)
         best: tuple | None = None
         options_list = [Options()] if quick else candidate_options(kitchen, steps)
@@ -83,9 +84,12 @@ class DefaultFromPDDL(FromPDDL):
             if best is None or outcome.key() > best[0]:
                 best = (outcome.key(), plan)
                 best_steps = chosen
+                expired = outcome.expired
         if best is None:
+            LAST_EXPIRED[0] = 0
             return ((), [])
-        _cache_put(cache_key, (best[0], best_steps))
+        LAST_EXPIRED[0] = expired
+        _cache_put(cache_key, (best[0], best_steps, expired))
         return best
 
     def translate_all(
@@ -171,6 +175,11 @@ def _cache_put(key: str | None, value) -> None:
             pickle.dump(value, handle)
     except Exception:  # noqa: BLE001
         pass
+
+
+# Orders the best rollout of the last plan scored let expire (read by the
+# problem generator right after scoring a plan).
+LAST_EXPIRED = [0]
 
 
 # Whether rollouts also try list scheduling, and whether the problem
