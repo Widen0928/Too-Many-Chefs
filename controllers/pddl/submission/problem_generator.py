@@ -78,6 +78,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         from . import from_pddl as _from_pddl
 
         _from_pddl.REORDER[0] = False
+        _from_pddl.REORDER[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safe"):
                 model_choice = "safe"

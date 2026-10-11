@@ -60,6 +60,7 @@ class DefaultFromPDDL(FromPDDL):
         """
         kitchen = Kitchen(self._environment)
         left_out = _orders_left_out(kitchen, steps)
+        REORDER[0] = _reorder_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -107,7 +108,7 @@ _CACHE_DIR = Path(tempfile.gettempdir()) / "too-many-chefs-rollouts"
 
 def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | None:
     try:
-        text = canonical(environment) + repr(steps) + repr(CONFIG) + repr(REORDER)
+        text = canonical(environment) + repr(steps) + repr(CONFIG) + repr(REORDER[0])
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
         return None
@@ -172,9 +173,24 @@ def _cache_put(key: str | None, value) -> None:
         pass
 
 
-# Whether rollouts also try list scheduling; set by the problem generator
-# from the level's strategy (a list so other modules can change it).
-REORDER = [False]
+# Whether rollouts also try list scheduling, and whether the problem
+# generator set that in this process (from the strategy it plays). The
+# controller runs the problem generator and this translation in separate
+# worker processes, so here the strategy chosen for the level is read
+# back from where strategy selection remembered it.
+REORDER = [False, False]
+
+
+def _reorder_for(environment) -> bool:
+    if REORDER[1]:
+        return REORDER[0]
+    try:
+        from .strategy import fingerprint, remembered
+
+        chosen = remembered(fingerprint(environment))
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(chosen, str) and chosen.endswith("r")
 
 
 def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):

@@ -30,7 +30,7 @@ class Config:
     tip_safe_seconds: float = 6.0
     # Horizons to choose between per level by playing the level out at the
     # start (strategy.py); empty to always use ``horizon``.
-    select_horizons: tuple = (3, "3r", 2, "2r", 1, "1r", "3safe", None, "r", 4, "4r")
+    select_horizons: tuple = (3, "3r", 2, None, 1, "2r", "3safe", 4, "1r", "r", "4r")
     # Seconds strategy selection may spend playing the level out. The
     # server stops a level after 60 s (Level 2) or 90 s (Level 3), and the
     # run itself needs time too, so this stays well inside.
