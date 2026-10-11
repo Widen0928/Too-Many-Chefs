@@ -190,7 +190,17 @@ def _reorder_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    return isinstance(chosen, str) and chosen.endswith("r")
+    on = isinstance(chosen, str) and chosen.endswith("r")
+    if not _ANNOUNCED:
+        _ANNOUNCED.append(True)
+        import sys
+
+        print(f"[tmc] translator uses strategy {chosen!r} (list scheduling {on})",
+              file=sys.stderr, flush=True)
+    return on
+
+
+_ANNOUNCED: list = []
 
 
 def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):

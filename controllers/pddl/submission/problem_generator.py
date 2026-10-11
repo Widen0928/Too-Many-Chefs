@@ -80,7 +80,11 @@ class DefaultProblemGenerator(ProblemGenerator):
         _from_pddl.REORDER[0] = False
         _from_pddl.REORDER[1] = True
         if isinstance(strategy, str):
-            if strategy.endswith("safe"):
+            if strategy.endswith("safer"):
+                model_choice = "safe"
+                _from_pddl.REORDER[0] = True
+                strategy = strategy[: -len("safer")]
+            elif strategy.endswith("safe"):
                 model_choice = "safe"
                 strategy = strategy[: -len("safe")]
             elif strategy.endswith("r"):

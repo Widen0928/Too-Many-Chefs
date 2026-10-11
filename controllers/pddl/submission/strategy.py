@@ -162,6 +162,16 @@ def choose_horizon(environment: Environment, options: list) -> object:
         return known
     import time
 
+    import sys
+
+    if _rush(environment):
+        # Orders revealed one at a time, or one due very soon (a rush
+        # ticket): list scheduling earned full points on such a kitchen, so
+        # its strategies are played out first.
+        options = [o for o in RUSH_FIRST if o in options or o == "3safer"] + [
+            o for o in options if o not in RUSH_FIRST
+        ]
+    print(f"[tmc] strategy options {options}", file=sys.stderr, flush=True)
     best = None
     started = time.monotonic()
     longest = 0.0
@@ -181,8 +191,27 @@ def choose_horizon(environment: Environment, options: list) -> object:
             continue
         finally:
             longest = max(longest, time.monotonic() - began)
+        print(f"[tmc] strategy {horizon!r} score {score} in {time.monotonic() - began:.1f}s",
+              file=sys.stderr, flush=True)
         if best is None or score > best[0]:
             best = (score, horizon)
     chosen = best[1] if best is not None else options[0]
+    print(f"[tmc] strategy chosen {chosen!r} after {time.monotonic() - started:.1f}s",
+          file=sys.stderr, flush=True)
     remember(key, chosen)
     return chosen
+
+
+# Played out first on rush levels (see choose_horizon).
+RUSH_FIRST = ("3r", "2r", "1r", "3safer", "r", 3, 2)
+
+
+def _rush(environment: Environment) -> bool:
+    from simulator.entities import OvercookedState
+
+    queue = environment.get_first_entity_of_type(OvercookedState).order_queue
+    entries = [*queue.visible, *queue.pending]
+    if len(entries) < 2:
+        return False
+    limits = [e.time_limit for e in entries if e.time_limit is not None]
+    return queue.order_reveal == "sequential" or bool(limits and min(limits) <= 30)
