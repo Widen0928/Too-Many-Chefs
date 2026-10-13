@@ -272,6 +272,11 @@ def strategy_options(environment: Environment, options: list) -> list:
                 if candidate not in options:
                     options.insert(position, candidate)
                     position += 1
+            # On slower graders, the search budget may expire before a late
+            # four-order grouping is tried. Test the two-by-two grouping
+            # right after the standard deadline plans.
+            options.remove("4rq1")
+            options.insert(options.index("3r") + 1, "4rq1")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
