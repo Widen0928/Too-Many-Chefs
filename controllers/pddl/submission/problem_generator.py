@@ -82,6 +82,9 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
+        farm_tips = isinstance(strategy, str) and strategy.endswith("tipfarm")
+        if farm_tips:
+            strategy = strategy[:-len("tipfarm")]
         pair_prefetch = strategy == "2buns"
         prefetch_buns = isinstance(strategy, str) and strategy.endswith("buns")
         if prefetch_buns:
@@ -129,7 +132,13 @@ class DefaultProblemGenerator(ProblemGenerator):
                 strategy = strategy[: -len("r")]
             strategy = int(strategy) if strategy else None
         horizon = self.horizon or strategy
-        tips = tip_problem(kitchen)
+        queue = kitchen.state.order_queue
+        last_ticket = (farm_tips and len(queue.visible) == 1 and not queue.pending
+                       and (queue.visible[0].time_limit is None or
+                            queue.visible[0].revealed_at + queue.visible[0].time_limit
+                            - environment.timestep >= 25))
+        tips = (tip_problem(kitchen, most=1, allow_feasible=True)
+                if last_ticket else tip_problem(kitchen))
         if tips is not None:
             # No order left can be made: earn the tips the orders on display
             # still owe, instead of stopping.
@@ -237,7 +246,10 @@ class DefaultProblemGenerator(ProblemGenerator):
             self._delivered = queue.delivered_count
         else:
             served = queue.delivered_count - self._delivered
-            if served and CONFIG.replan_on_delivery:
+            if served and (CONFIG.replan_on_delivery or (
+                len(queue.visible) == 1
+                and self._strategy_horizon(environment) == "3tipfarm"
+            )):
                 return self._reset()
             if (
                 queue.expired_count != self._expired
@@ -775,7 +787,7 @@ def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list,
         problem.add_fact(f"(next_order {previous} {end})")
 
 
-def tip_problem(kitchen: Kitchen, most: int = 3) -> str | None:
+def tip_problem(kitchen: Kitchen, most: int = 3, *, allow_feasible: bool = False) -> str | None:
     """A problem for the tips the orders on display still owe, once none of
     them can be made and no more are to come; None otherwise.
 
@@ -790,7 +802,9 @@ def tip_problem(kitchen: Kitchen, most: int = 3) -> str | None:
     state = kitchen.state
     queue = state.order_queue
     visible = list(queue.visible)
-    if not visible or queue.pending or feasible_orders(kitchen, queued_orders(kitchen)):
+    if not visible or queue.pending or (
+        not allow_feasible and feasible_orders(kitchen, queued_orders(kitchen))
+    ):
         return None
     team = next((c.team for c in kitchen.chefs if c.team), None)
     paid = queue.tipped.get(team or "", {})
@@ -847,6 +861,13 @@ def tip_problem(kitchen: Kitchen, most: int = 3) -> str | None:
         found = cover(food)
         if found:
             covers[food] = found
+    if allow_feasible:
+        simple = {
+            recipe.output for recipe in state.combine_recipes
+            if all(ingredient in infinite for ingredient in recipe.ingredients)
+        }
+        covers = {food: covered for food, covered in covers.items()
+                  if food in simple and food in owed}
     free = [
         loc
         for loc, counter in sorted(kitchen.counters.items())

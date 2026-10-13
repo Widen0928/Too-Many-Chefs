@@ -45,7 +45,7 @@ def test_six_identical_orders_try_tip_safe_before_other_horizons():
     queue = OrderQueue.from_orders([OrderEntry(name='cake', time_limit=100)] * 6)
     env = Environment().with_entity(OvercookedState(order_queue=queue))
     options = [3, '3r', 2, '3safe', None]
-    assert strategy.strategy_options(env, options) == [3, '3safe', '3r', 2, None]
+    assert strategy.strategy_options(env, options) == [3, '3safe', '3tipfarm', '3r', 2, None]
     assert options == [3, '3r', 2, '3safe', None]
 
 

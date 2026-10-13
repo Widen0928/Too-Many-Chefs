@@ -228,6 +228,7 @@ def strategy_options(environment: Environment, options: list) -> list:
             and "3safe" in options):
         options.remove("3safe")
         options.insert(1, "3safe")
+        options.insert(2, "3tipfarm")
     if (
         CONFIG.select_order_batches
         and queue.order_reveal == "all"
