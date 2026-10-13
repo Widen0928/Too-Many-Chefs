@@ -42,7 +42,7 @@ from simulator.mutations.cooking import current_timer
 
 from .config import CONFIG
 from .dispatch import Options, dispatch
-from .kitchen import Kitchen, chef_symbol, parse_loc
+from .kitchen import Kitchen, chef_symbol, food_symbol, loc_symbol, parse_loc
 from .rollout import simulate
 
 
@@ -63,6 +63,7 @@ class DefaultFromPDDL(FromPDDL):
         kitchen = Kitchen(self._environment)
         left_out = _orders_left_out(kitchen, steps)
         REORDER[0] = _reorder_for(self._environment)
+        PREFETCH[0] = _prefetch_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -87,12 +88,21 @@ class DefaultFromPDDL(FromPDDL):
                 best = (outcome.key(), plan)
                 best_steps = chosen
                 expired = outcome.expired
+        if not quick and PREFETCH[0]:
+            for chosen in prefetch_bun_candidates(kitchen, steps):
+                plan = self.translate_all(kitchen, chosen, left_out)
+                outcome = simulate(self._environment, plan)
+                if best is None or outcome.key() > best[0]:
+                    best = (outcome.key(), plan)
+                    best_steps = chosen
+                    expired = outcome.expired
         if best is None:
             LAST_EXPIRED[0] = 0
             return ((), [])
         LAST_EXPIRED[0] = expired
         _cache_put(cache_key, (best[0], best_steps, expired))
         return best
+
 
     def translate_all(
         self, kitchen: Kitchen, steps: list[PDDLPlanStep], left_out: bool
@@ -104,6 +114,71 @@ class DefaultFromPDDL(FromPDDL):
         if plan and left_out:
             plan.append(_wait_to_replan(plan[-1]))
         return plan
+
+def prefetch_bun_candidates(kitchen: Kitchen, steps: list[PDDLPlanStep]):
+    """Stage two buns in free counters while the other chef handles the pan."""
+    if (kitchen.environment.timestep != 0 or len(kitchen.chefs) != 2
+            or len(kitchen.state.order_queue.visible) < 4):
+        return
+    burning = [s for s in kitchen.stations if s.location and kitchen.burns(s)]
+    if not burning:
+        return
+    bun = next(((loc, food_symbol(storage.food_name))
+                for loc, storage in kitchen.storages.items()
+                if storage.food_name.endswith("/bun")), None)
+    if bun is None:
+        return
+    bun_loc, bun_food = bun
+    targets = [i for i, step in enumerate(steps)
+               if step.name == "take_food_onto_dish"
+               and step.parameters[2] == bun_food
+               and step.parameters[3] == "p_grilled_meat"]
+    if len(targets) < 3:
+        return
+    first, third = targets[0], targets[2]
+    used = {part for step in steps for part in step.parameters if part.startswith("loc_")}
+    chefs = [chef_symbol(chef.id) for chef in kitchen.chefs]
+    pan = burning[0].location
+    counters = [loc for loc, counter in kitchen.counters.items()
+                if counter.held_item_id is None
+                and loc_symbol(loc) not in used
+                and all(loc in kitchen.reach[chef.id] for chef in kitchen.chefs)]
+    counters.sort(key=lambda loc: (
+        abs(loc[0] - bun_loc[0]) + abs(loc[1] - bun_loc[1])
+        + abs(loc[0] - pan[0]) + abs(loc[1] - pan[1]),
+        abs((abs(loc[0] - bun_loc[0]) + abs(loc[1] - bun_loc[1]))
+            - (abs(loc[0] - pan[0]) + abs(loc[1] - pan[1]))),
+        loc,
+    ))
+    for first_counter in counters[:3]:
+        for third_counter in counters[:3]:
+            if first_counter == third_counter:
+                continue
+            replacements = {}
+            insertions: dict[int, list[PDDLPlanStep]] = {}
+            for index, counter in ((first, first_counter), (third, third_counter)):
+                original = steps[index]
+                helper = next((chef for chef in chefs if chef != original.parameters[0]), None)
+                if helper is None:
+                    break
+                loc = loc_symbol(counter)
+                insertion = 0 if index == first else index - 1
+                insertions.setdefault(insertion, []).extend((
+                    PDDLPlanStep("take_food", (helper, loc_symbol(bun_loc), bun_food)),
+                    PDDLPlanStep("put_down", (helper, loc, bun_food)),
+                ))
+                replacements[index] = PDDLPlanStep(
+                    "counter_food_onto_plate",
+                    (original.parameters[0], loc, bun_food,
+                     original.parameters[3], original.parameters[4]),
+                )
+            if len(replacements) != 2:
+                continue
+            candidate = []
+            for index, step in enumerate(steps):
+                candidate.extend(insertions.get(index, ()))
+                candidate.append(replacements.get(index, step))
+            yield candidate
 
 
 # The problem generator already tries plans out to choose between models;
@@ -155,7 +230,7 @@ def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | Non
     try:
         text = (
             _cache_namespace() + canonical(environment) + repr(steps)
-            + repr(CONFIG) + repr(REORDER[0])
+            + repr(CONFIG) + repr(REORDER[0]) + repr(PREFETCH[0])
         )
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
@@ -253,6 +328,19 @@ LAST_EXPIRED = [0]
 # worker processes, so here the strategy chosen for the level is read
 # back from where strategy selection remembered it.
 REORDER = [False, False]
+PREFETCH = [False, False]
+
+
+def _prefetch_for(environment) -> bool:
+    if PREFETCH[1]:
+        return PREFETCH[0]
+    try:
+        from .strategy import fingerprint, remembered
+
+        chosen = remembered(fingerprint(environment))
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(chosen, str) and chosen.endswith("buns")
 
 
 def _reorder_for(environment) -> bool:

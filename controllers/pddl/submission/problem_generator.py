@@ -82,6 +82,9 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
+        prefetch_buns = isinstance(strategy, str) and strategy.endswith("buns")
+        if prefetch_buns:
+            strategy = strategy[:-4]
         deadline_alternatives = CONFIG.deadline_alternatives
         if isinstance(strategy, str) and strategy.endswith(("swap", "w")):
             # This switch belongs to the selected whole-level policy, so it
@@ -106,6 +109,8 @@ class DefaultProblemGenerator(ProblemGenerator):
 
         _from_pddl.REORDER[0] = False
         _from_pddl.REORDER[1] = True
+        _from_pddl.PREFETCH[0] = prefetch_buns
+        _from_pddl.PREFETCH[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safer"):
                 model_choice = "safe"
