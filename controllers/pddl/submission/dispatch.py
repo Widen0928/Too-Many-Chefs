@@ -111,6 +111,7 @@ class Options:
     exclude: frozenset[str] = frozenset()
     # Only the chefs the plan names may get jobs (Part 4: one chef each).
     solo: bool = False
+    load_balance: float = 0.0
 
 
 def dispatch(
@@ -411,6 +412,7 @@ class _Dispatcher:
         last_index = {c: -1 for c in self.chefs}
         # Chefs holding something they have not put down yet.
         hands_full = {c for c, chef in self.chefs.items() if chef.held_item_id is not None}
+        job_count = {c: 0 for c in self.chefs}
         result: list[tuple[int, PDDLPlanStep]] = []
 
         if self.options.reorder:
@@ -441,7 +443,7 @@ class _Dispatcher:
                 if trial is None:
                     continue
                 finish = trial[0]
-                key = (finish, c != job.chef)
+                key = (finish + self.options.load_balance * job_count[c], c != job.chef)
                 if best is None or key < best[0]:
                     best = (key, c, trial)
             if best is None:
@@ -468,6 +470,7 @@ class _Dispatcher:
                 print(f"{c:12s} {free[c]:6.1f}->{finish:6.1f} "
                       + "; ".join(f"{i}:{st.name} {' '.join(st.parameters[1:])}" for i, st in new_steps))
             free[c] = finish
+            job_count[c] += 1
             last_index[c] = max(last_index[c], job.steps[-1][0])
             if job.hands_free:
                 pass
