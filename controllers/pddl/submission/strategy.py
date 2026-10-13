@@ -223,6 +223,11 @@ def strategy_options(environment: Environment, options: list) -> list:
             o for o in options if o not in RUSH_FIRST
         ]
     queue = environment.get_first_entity_of_type(OvercookedState).order_queue
+    if (queue.order_reveal == "all" and len(queue.visible) >= 6
+            and len({entry.name for entry in queue.visible}) == 1
+            and "3safe" in options):
+        options.remove("3safe")
+        options.insert(1, "3safe")
     if (
         CONFIG.select_order_batches
         and queue.order_reveal == "all"

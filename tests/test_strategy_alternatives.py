@@ -41,6 +41,14 @@ def test_experimental_swap_policies_are_disabled_by_default():
     assert strategy.strategy_options(environment(), [3, '3r', 2]) == [3, '3r', 2]
 
 
+def test_six_identical_orders_try_tip_safe_before_other_horizons():
+    queue = OrderQueue.from_orders([OrderEntry(name='cake', time_limit=100)] * 6)
+    env = Environment().with_entity(OvercookedState(order_queue=queue))
+    options = [3, '3r', 2, '3safe', None]
+    assert strategy.strategy_options(env, options) == [3, '3safe', '3r', 2, None]
+    assert options == [3, '3r', 2, '3safe', None]
+
+
 @pytest.mark.parametrize('bound, expected_calls', [(51, [3]), (None, [3, '3r'])])
 def test_selection_stops_only_after_a_supported_score_bound(monkeypatch, bound, expected_calls):
     from controllers.pddl.submission import score_bound
