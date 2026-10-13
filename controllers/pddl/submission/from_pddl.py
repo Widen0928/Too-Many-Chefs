@@ -64,6 +64,7 @@ class DefaultFromPDDL(FromPDDL):
         left_out = _orders_left_out(kitchen, steps)
         REORDER[0] = _reorder_for(self._environment)
         PREFETCH[0] = _prefetch_for(self._environment)
+        PAIR[0] = _pair_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -96,6 +97,17 @@ class DefaultFromPDDL(FromPDDL):
                     best = (outcome.key(), plan)
                     best_steps = chosen
                     expired = outcome.expired
+        if not quick and PAIR[0] and self._environment.timestep == 0:
+            pair_best = None
+            for chosen in prefetch_first_two_burgers(kitchen, steps):
+                plan = self.translate_all(kitchen, chosen, left_out)
+                outcome = simulate(self._environment, plan)
+                if pair_best is None or outcome.key() > pair_best[0]:
+                    pair_best = (outcome.key(), plan)
+                    best_steps = chosen
+                    expired = outcome.expired
+            if pair_best is not None:
+                best = pair_best
         if best is None:
             LAST_EXPIRED[0] = 0
             return ((), [])
@@ -201,6 +213,64 @@ def prefetch_bun_candidates(kitchen: Kitchen, steps: list[PDDLPlanStep]):
                 candidate.extend(insertions.get(index, ()))
                 candidate.append(replacements.get(index, step))
             yield candidate
+
+
+def prefetch_first_two_burgers(kitchen, steps):
+    """Let the second chef queue meat while the first completes an urgent burger."""
+    names = [step.name for step in steps]
+    if names != [
+        "pick_up", "take_food_onto_dish", "plate_into_station",
+        "cook_by_itself", "station_onto_plate_tended", "take_food_onto_dish",
+        "take_food", "put_in_station", "cook", "station_onto_plate",
+        "pick_up", "take_food_onto_dish", "plate_into_station",
+        "cook_by_itself", "station_onto_plate_tended", "take_food_onto_dish",
+        "deliver", "deliver",
+    ]:
+        return
+    first, second = steps[0].parameters[0], steps[10].parameters[0]
+    if first == second:
+        return
+    bun_loc = next((loc for loc, storage in kitchen.storages.items()
+                    if food_symbol(storage.food_name) == steps[5].parameters[2]), None)
+    if bun_loc is None:
+        return
+    bun_food = steps[5].parameters[2]
+    used = {part for step in steps for part in step.parameters if part.startswith("loc_")}
+    counters = [loc for loc, counter in kitchen.counters.items()
+                if counter.held_item_id is None and loc_symbol(loc) not in used
+                and all(loc in kitchen.reach[chef.id] for chef in kitchen.chefs)]
+    pan_loc = next((station.location for station in kitchen.stations
+                    if station.symbol == steps[2].parameters[1]), None)
+    if pan_loc is None:
+        return
+    counters.sort(key=lambda loc: (
+        abs(loc[0] - bun_loc[0]) + abs(loc[1] - bun_loc[1])
+        + abs(loc[0] - pan_loc[0]) + abs(loc[1] - pan_loc[1]), loc))
+    for counter in counters[:6]:
+        loc = loc_symbol(counter)
+        first_burger = PDDLPlanStep(
+            "counter_food_onto_plate",
+            (first, loc, bun_food, steps[5].parameters[3], steps[5].parameters[4]),
+        )
+        first_delivery = PDDLPlanStep(
+            "deliver", (first, *steps[16].parameters[1:]),
+        )
+        cheese = [
+            PDDLPlanStep(step.name, (first, *step.parameters[1:]))
+            for step in steps[6:9]
+        ]
+        cheese_onto_burger = PDDLPlanStep(
+            steps[9].name, (second, *steps[9].parameters[1:]),
+        )
+        second_delivery = PDDLPlanStep(
+            "deliver", (second, *steps[17].parameters[1:]),
+        )
+        yield [
+            PDDLPlanStep("take_food", (second, loc_symbol(bun_loc), bun_food)),
+            PDDLPlanStep("put_down", (second, loc, bun_food)),
+            *steps[:5], *steps[10:15], first_burger, first_delivery,
+            *cheese, steps[15], cheese_onto_burger, second_delivery,
+        ]
 
 
 # The problem generator already tries plans out to choose between models;
@@ -351,6 +421,19 @@ LAST_EXPIRED = [0]
 # back from where strategy selection remembered it.
 REORDER = [False, False]
 PREFETCH = [False, False]
+PAIR = [False, False]
+
+
+def _pair_for(environment) -> bool:
+    if PAIR[1]:
+        return PAIR[0]
+    try:
+        from .strategy import fingerprint, remembered
+
+        chosen = remembered(fingerprint(environment))
+    except Exception:  # noqa: BLE001
+        return False
+    return chosen == "2buns"
 
 
 def _prefetch_for(environment) -> bool:

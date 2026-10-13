@@ -125,6 +125,28 @@ print(json.dumps(from_pddl._prefetch_for(environment)))
     assert json.loads(result.stdout) is True
 
 
+def test_pair_policy_is_restored_in_a_fresh_worker(tmp_path, monkeypatch):
+    environment = burning_kitchen()
+    monkeypatch.setattr(strategy, "_DIR", tmp_path)
+    strategy.remember(strategy.fingerprint(environment), "2buns")
+    code = """
+import json, sys
+from pathlib import Path
+from controllers.pddl.submission import from_pddl, strategy
+from simulator.environment import Environment
+strategy._DIR = Path(sys.argv[1])
+environment = Environment.model_validate_json(sys.stdin.read())
+print(json.dumps(from_pddl._pair_for(environment)))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        input=environment.model_dump_json(), text=True, capture_output=True,
+        check=True, cwd=Path(__file__).parents[1],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert json.loads(result.stdout) is True
+
+
 def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monkeypatch):
     environment = burning_kitchen()
     monkeypatch.setattr(from_pddl, "REORDER", [False, False])
@@ -149,12 +171,13 @@ def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monke
 def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_duplicated():
     options = [3, "3r", 2, None, "3w"]
     selected = strategy.strategy_options(burning_kitchen(), options)
-    assert selected == [3, "3r", "3rb", "swap", "swapbuns", "1buns", "4rq5", 2, None, "3w"]
+    assert selected == [3, "3r", "3rb", "swap", "swapbuns", "1buns", "2buns", "4rq5", 2, None, "3w"]
     assert options == [3, "3r", 2, None, "3w"]
     assert strategy.strategy_options(burning_kitchen(), selected).count("3rb") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swap") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swapbuns") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("1buns") == 1
+    assert strategy.strategy_options(burning_kitchen(), selected).count("2buns") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("4rq5") == 1
 
 

@@ -82,6 +82,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
+        pair_prefetch = strategy == "2buns"
         prefetch_buns = isinstance(strategy, str) and strategy.endswith("buns")
         if prefetch_buns:
             strategy = strategy[:-4]
@@ -105,12 +106,16 @@ class DefaultProblemGenerator(ProblemGenerator):
         # the tip-keeping model only (slower plans, every tip kept); "r" also
         # tries list-scheduling the jobs (see from_pddl.candidate_options).
         model_choice = CONFIG.models
+        if pair_prefetch:
+            model_choice = "fast"
         from . import from_pddl as _from_pddl
 
         _from_pddl.REORDER[0] = False
         _from_pddl.REORDER[1] = True
         _from_pddl.PREFETCH[0] = prefetch_buns
         _from_pddl.PREFETCH[1] = True
+        _from_pddl.PAIR[0] = pair_prefetch
+        _from_pddl.PAIR[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safer"):
                 model_choice = "safe"
