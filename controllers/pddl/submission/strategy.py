@@ -277,6 +277,10 @@ def strategy_options(environment: Environment, options: list) -> list:
             # right after the standard deadline plans.
             options.remove("4rq1")
             options.insert(options.index("3r") + 1, "4rq1")
+            # The alternative pairing is faster on the original burning
+            # kitchen. Give it a turn before the search budget expires.
+            options.remove("4rq4")
+            options.insert(options.index("3r") + 1, "4rq4")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
