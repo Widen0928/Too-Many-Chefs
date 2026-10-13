@@ -263,6 +263,14 @@ def strategy_options(environment: Environment, options: list) -> list:
             options.insert(options.index("1buns") + 1, "2buns")
         if has_chain and len(queue.visible) == 4 and "4rq5" not in options:
             options.insert(options.index("2buns") + 1, "4rq5")
+        if has_chain and len(queue.visible) == 4:
+            # Complete the distinct four-ticket groupings. The best order
+            # depends on the hidden kitchen's travel and cooking bottlenecks.
+            position = options.index("4rq5")
+            for candidate in ("4rq2", "4rq1", "4rq4"):
+                if candidate not in options:
+                    options.insert(position, candidate)
+                    position += 1
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
