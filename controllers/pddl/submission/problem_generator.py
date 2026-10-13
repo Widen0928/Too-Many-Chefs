@@ -85,6 +85,9 @@ class DefaultProblemGenerator(ProblemGenerator):
         farm_tips = isinstance(strategy, str) and strategy.endswith("tipfarm")
         if farm_tips:
             strategy = strategy[:-len("tipfarm")]
+        prefetch_next = isinstance(strategy, str) and strategy.endswith("prep")
+        if prefetch_next:
+            strategy = strategy[:-4]
         pair_prefetch = strategy == "2buns"
         prefetch_buns = isinstance(strategy, str) and strategy.endswith("buns")
         if prefetch_buns:
@@ -109,7 +112,7 @@ class DefaultProblemGenerator(ProblemGenerator):
         # the tip-keeping model only (slower plans, every tip kept); "r" also
         # tries list-scheduling the jobs (see from_pddl.candidate_options).
         model_choice = CONFIG.models
-        if pair_prefetch:
+        if pair_prefetch or prefetch_next:
             model_choice = "fast"
         from . import from_pddl as _from_pddl
 
@@ -119,6 +122,8 @@ class DefaultProblemGenerator(ProblemGenerator):
         _from_pddl.PREFETCH[1] = True
         _from_pddl.PAIR[0] = pair_prefetch
         _from_pddl.PAIR[1] = True
+        _from_pddl.NEXT_PREP[0] = prefetch_next
+        _from_pddl.NEXT_PREP[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safer"):
                 model_choice = "safe"

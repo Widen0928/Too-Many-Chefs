@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from controllers.pddl.interfaces import FromPDDL, PDDLPlanStep
-from simulator.entities import Food
+from simulator.entities import Food, Plate
 from simulator.entities.plate import PLATE_NAME
 from simulator.environment import Environment
 from simulator.mutations import (
@@ -42,7 +42,7 @@ from simulator.mutations.cooking import current_timer
 
 from .config import CONFIG
 from .dispatch import Options, dispatch
-from .kitchen import Kitchen, chef_symbol, food_symbol, loc_symbol, parse_loc
+from .kitchen import Kitchen, chef_symbol, food_symbol, loc_symbol, parse_loc, plate_symbol
 from .rollout import simulate
 
 
@@ -65,6 +65,7 @@ class DefaultFromPDDL(FromPDDL):
         REORDER[0] = _reorder_for(self._environment)
         PREFETCH[0] = _prefetch_for(self._environment)
         PAIR[0] = _pair_for(self._environment)
+        NEXT_PREP[0] = _next_prep_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -108,6 +109,14 @@ class DefaultFromPDDL(FromPDDL):
                     expired = outcome.expired
             if pair_best is not None:
                 best = pair_best
+        if NEXT_PREP[0] and self._environment.timestep == 0:
+            staged = prefetch_next_order_meat(kitchen, best_steps)
+            if staged is not None:
+                best_steps = staged
+                plan = self.translate_all(kitchen, staged, left_out)
+                outcome = simulate(self._environment, plan)
+                best = (outcome.key(), plan)
+                expired = outcome.expired
         if best is None:
             LAST_EXPIRED[0] = 0
             return ((), [])
@@ -126,6 +135,55 @@ class DefaultFromPDDL(FromPDDL):
         if plan and left_out:
             plan.append(_wait_to_replan(plan[-1]))
         return plan
+
+def prefetch_next_order_meat(
+    kitchen: Kitchen, steps: list[PDDLPlanStep]
+) -> list[PDDLPlanStep] | None:
+    """Use the idle chef to start the fourth burger before the next replan.
+
+    Three-ticket plans otherwise leave all work for ticket four until the
+    third delivery. Holding its meat on a spare plate is independent of the
+    third patty cooking, and the following PDDL problem can use that plate.
+    """
+    queue = kitchen.state.order_queue
+    if (len(kitchen.chefs) != 2 or len(queue.visible) != 4
+            or "burger" not in queue.visible[-1].name
+            or sum(step.name.startswith("deliver") for step in steps) != 3):
+        return None
+    pan = next((s for s in kitchen.stations if s.location and kitchen.burns(s)), None)
+    meat = next(((loc, food_symbol(storage.food_name))
+                 for loc, storage in kitchen.storages.items()
+                 if storage.food_name.endswith("/meat")), None)
+    if pan is None or meat is None:
+        return None
+    last_pan_chef = next((step.parameters[0] for step in reversed(steps)
+                         if step.name == "station_onto_plate_tended"
+                         and step.parameters[1] == pan.symbol), None)
+    helper = next((chef for chef in kitchen.chefs
+                   if chef_symbol(chef.id) != last_pan_chef), None)
+    if helper is None or last_pan_chef is None:
+        return None
+    used = {step.parameters[1] for step in steps if step.name == "pick_up"}
+    plates = [plate for plate in kitchen.environment.get_entities_of_type(Plate)
+              if plate.x is not None and plate.y is not None
+              and plate.held_item_id is None and not plate.dirty
+              and loc_symbol((plate.x, plate.y)) not in used
+              and (plate.x, plate.y) in kitchen.reach[helper.id]]
+    if not plates:
+        return None
+    plates.sort(key=lambda plate: (
+        abs(plate.x - meat[0][0]) + abs(plate.y - meat[0][1]),
+        plate.x, plate.y,
+    ))
+    chef = chef_symbol(helper.id)
+    plate_loc = loc_symbol((plates[0].x, plates[0].y))
+    meat_loc, meat_food = meat
+    return [*steps,
+            PDDLPlanStep("pick_up", (chef, plate_loc, "p_empty")),
+            PDDLPlanStep("take_food_onto_dish",
+                         (chef, loc_symbol(meat_loc), meat_food,
+                          "p_empty", plate_symbol(kitchen.storages[meat_loc].food_name)))]
+
 
 def prefetch_bun_candidates(kitchen: Kitchen, steps: list[PDDLPlanStep]):
     """Stage two buns in free counters while the other chef handles the pan."""
@@ -323,6 +381,7 @@ def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | Non
         text = (
             _cache_namespace() + canonical(environment) + repr(steps)
             + repr(CONFIG) + repr(REORDER[0]) + repr(PREFETCH[0])
+            + repr(PAIR[0]) + repr(NEXT_PREP[0])
         )
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
@@ -422,6 +481,19 @@ LAST_EXPIRED = [0]
 REORDER = [False, False]
 PREFETCH = [False, False]
 PAIR = [False, False]
+NEXT_PREP = [False, False]
+
+
+def _next_prep_for(environment) -> bool:
+    if NEXT_PREP[1]:
+        return NEXT_PREP[0]
+    try:
+        from .strategy import fingerprint, remembered
+
+        chosen = remembered(fingerprint(environment))
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(chosen, str) and chosen.endswith("prep")
 
 
 def _pair_for(environment) -> bool:
@@ -459,7 +531,8 @@ def _reorder_for(environment) -> bool:
         return False
     on = (
         isinstance(chosen, str)
-        and chosen.removesuffix("swap").removesuffix("w").removesuffix("b").endswith("r")
+        and chosen.removesuffix("prep").removesuffix("swap")
+        .removesuffix("w").removesuffix("b").endswith("r")
     )
     if not _ANNOUNCED:
         _ANNOUNCED.append(True)
