@@ -88,6 +88,9 @@ class DefaultProblemGenerator(ProblemGenerator):
             # follows the remembered strategy into every planning worker.
             deadline_alternatives = True
             strategy = strategy[:-4] if strategy.endswith("swap") else strategy[:-1]
+        batch = isinstance(strategy, str) and strategy.endswith("b")
+        if batch:
+            strategy = strategy[:-1]
         # A strategy is a horizon, possibly with a suffix: "safe" plans with
         # the tip-keeping model only (slower plans, every tip kept); "r" also
         # tries list-scheduling the jobs (see from_pddl.candidate_options).
@@ -116,7 +119,8 @@ class DefaultProblemGenerator(ProblemGenerator):
             problem = PDDLProblem(domain=domain, problem=tips)
             if probe(problem, LATER_PROBE_SECONDS):
                 return problem
-        for entries, seconds in goal_sets(kitchen, horizon):
+        candidates = goal_sets(kitchen, horizon, batch=True) if batch else goal_sets(kitchen, horizon)
+        for entries, seconds in candidates:
             if not entries:
                 return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
             best: tuple | None = None
@@ -330,7 +334,7 @@ FIRST_PROBE_SECONDS = 10.0
 LATER_PROBE_SECONDS = 4.0
 
 
-def goal_sets(kitchen: Kitchen, horizon: int | None = None):
+def goal_sets(kitchen: Kitchen, horizon: int | None = None, *, batch: bool = False):
     """Goal sets to try, best first, each with a time limit for checking it.
 
     A problem with an unreachable goal gives no plan at all and the chefs
@@ -339,6 +343,8 @@ def goal_sets(kitchen: Kitchen, horizon: int | None = None):
     order on its own, without the feasibility check in case it was wrong.
     """
     queue = queued_orders(kitchen)
+    if batch:
+        queue = batch_orders(kitchen, queue)
     feasible = feasible_orders(kitchen, queue)[:horizon]
     tried: list[list] = []
     seconds = FIRST_PROBE_SECONDS
@@ -701,6 +707,23 @@ def queued_orders(kitchen: Kitchen) -> list:
     return entries
 
 
+def batch_orders(kitchen: Kitchen, entries: list) -> list:
+    """Group matching dishes while keeping each group's first-ticket rank.
+
+    This can put a simple repeat dish before a slower earlier-deadline
+    dish. It is compared as a whole-level policy because the tradeoff can
+    improve throughput or lose an urgent order. Ticket order within each
+    dish stays unchanged, matching the simulator's delivery semantics.
+    """
+    queue = kitchen.state.order_queue
+    if queue.order_reveal != "all" or queue.strict_ordering:
+        return list(entries)
+    groups: dict[str, list] = {}
+    for entry in entries:
+        groups.setdefault(entry.name, []).append(entry)
+    return [entry for group in groups.values() for entry in group]
+
+
 def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list) -> None:
     """One order object per planned order, each with a goal to serve it;
     serving one opens the next (see ``queued_orders``)."""
@@ -843,7 +866,8 @@ def feasible_orders(kitchen: Kitchen, entries: list) -> list:
     out; food already in the kitchen (on counters, in stations, on plates or
     in hands) can be used once. Orders are checked in turn and each feasible
     one reserves the finite food it needs, so with two loose cherries only
-    two cherry dishes are planned.
+    two cherry dishes are planned. When tickets can be served independently,
+    scarce ingredients go to the subset with the highest delivery reward.
     """
     reachable = set().union(*kitchen.reach.values()) if kitchen.reach else set()
     infinite = {
@@ -888,10 +912,27 @@ def feasible_orders(kitchen: Kitchen, entries: list) -> list:
     plates = plate_supply(kitchen, reachable)
     start = tuple(sorted(stock.items()))
     memo: dict = {}
+    queue = kitchen.state.order_queue
+    rewards_by_dish: dict[str, set[int]] = {}
+    for entry in queue.visible:
+        rewards_by_dish.setdefault(entry.name, set()).add(entry.reward)
+    # Delivery accepts the first visible ticket with a matching dish name.
+    # Different rewards for identical dishes therefore cannot be selected
+    # independently. Keep the existing count policy in that case, and when
+    # later tickets cannot legally be served before earlier ones.
+    by_reward = (
+        queue.order_reveal == "all"
+        and not queue.strict_ordering
+        and len({entry.reward for entry in entries}) > 1
+        and all(len(rewards) == 1 for rewards in rewards_by_dish.values())
+    )
+
+    def value(indices: tuple[int, ...]) -> tuple[int, int]:
+        reward = sum(entries[i].reward for i in indices) if by_reward else 0
+        return reward, len(indices)
 
     def best(i: int, stock: tuple, plates: int | None) -> tuple[int, ...]:
-        """Indices of the most orders from ``i`` on that can still be made,
-        preferring earlier ones."""
+        """Indices of the most valuable feasible subset, in queue order."""
         if i == len(entries) or plates == 0:
             return ()
         key = (i, stock, plates)
@@ -900,8 +941,9 @@ def feasible_orders(kitchen: Kitchen, entries: list) -> list:
         chosen = best(i + 1, stock, plates)
         for left in sorted(options(entries[i].name, stock, 0)):
             rest = best(i + 1, left, None if plates is None else plates - 1)
-            if len(rest) + 1 > len(chosen):
-                chosen = (i, *rest)
+            candidate = (i, *rest)
+            if value(candidate) > value(chosen):
+                chosen = candidate
                 if len(chosen) == len(entries) - i:
                     break
         memo[key] = chosen

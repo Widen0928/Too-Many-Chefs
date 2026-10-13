@@ -49,6 +49,9 @@ class Config:
     select_deadline_alternatives: bool = False
     # Dispatch variants to roll out: "full" or "small".
     candidates: str = "full"
+    # Compare grouping identical dishes as a separate whole-level policy
+    # in timed kitchens with cooking chains. Keep deadline sorting available.
+    select_order_batches: bool = True
 
 
 def load() -> Config:

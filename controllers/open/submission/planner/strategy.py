@@ -85,7 +85,6 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
     Returns a score key: points, then fewer timesteps.
     """
     from controllers.navigation import DefaultMutationInterpolationPolicy
-    from controllers.navigation.traffic import AgentDeadlockError
     from controllers.pddl.controller import group_mutations_by_agent
     from controllers.pddl.solvers import solve_problem_with_logging
     from simulator.context import Context
@@ -93,7 +92,9 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
 
     from .from_pddl import DefaultFromPDDL
     from .problem_generator import DefaultProblemGenerator
+    from .rollout import navigation_deadlock_errors
 
+    deadlock_errors = navigation_deadlock_errors()
     generator = DefaultProblemGenerator()
     generator.forced_horizon = horizon
     policy = DefaultMutationInterpolationPolicy()
@@ -129,7 +130,7 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
             plans = group_mutations_by_agent(mutations=mutations, agent_ids=agent_ids)
         try:
             actions, plans = policy.get_mutations(plans, env, context)
-        except AgentDeadlockError:
+        except deadlock_errors:
             break
         if not actions:
             if all(not queue for queue in plans.values()):

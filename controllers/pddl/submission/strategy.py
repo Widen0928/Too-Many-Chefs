@@ -90,7 +90,6 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
     Returns a score key: points, then fewer timesteps.
     """
     from controllers.navigation import DefaultMutationInterpolationPolicy
-    from controllers.navigation.traffic import AgentDeadlockError
     from controllers.pddl.controller import group_mutations_by_agent
     from controllers.pddl.solvers import solve_problem_with_logging
     from simulator.context import Context
@@ -98,7 +97,9 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
 
     from .from_pddl import DefaultFromPDDL
     from .problem_generator import DefaultProblemGenerator
+    from .rollout import navigation_deadlock_errors
 
+    deadlock_errors = navigation_deadlock_errors()
     generator = DefaultProblemGenerator()
     generator.forced_horizon = horizon
     policy = DefaultMutationInterpolationPolicy()
@@ -141,7 +142,7 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
             plans = group_mutations_by_agent(mutations=mutations, agent_ids=agent_ids)
         try:
             actions, plans = policy.get_mutations(plans, env, context)
-        except AgentDeadlockError:
+        except deadlock_errors:
             break
         if not actions:
             if all(not queue for queue in plans.values()):
@@ -222,6 +223,28 @@ def strategy_options(environment: Environment, options: list) -> list:
             o for o in options if o not in RUSH_FIRST
         ]
     queue = environment.get_first_entity_of_type(OvercookedState).order_queue
+    if (
+        CONFIG.select_order_batches
+        and queue.order_reveal == "all"
+        and not queue.strict_ordering
+        and len({entry.name for entry in queue.visible}) < len(queue.visible)
+        and len({entry.name for entry in queue.visible}) >= 2
+        and any(entry.time_limit is not None for entry in queue.visible)
+        and "3r" in options
+    ):
+        from .kitchen import Kitchen
+
+        kitchen = Kitchen(environment)
+        # Repeated dishes on a cooking chain can avoid costly alternation
+        # between short and long recipes. Compare the full run, since this
+        # intentionally changes which deadline the controller serves first.
+        has_chain = any(
+            {recipe.output for recipe in kitchen.state.cook_recipes if recipe.equipment == station.name}
+            & {recipe.ingredient for recipe in kitchen.state.cook_recipes if recipe.equipment == station.name}
+            for station in kitchen.stations
+        )
+        if has_chain and "3rb" not in options:
+            options.insert(options.index("3r") + 1, "3rb")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives

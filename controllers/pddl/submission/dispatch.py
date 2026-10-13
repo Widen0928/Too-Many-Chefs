@@ -556,6 +556,16 @@ class _Dispatcher:
             pending.remove(job)
             done.add(id(job))
             self.pocket_owner.update(pockets)
+            # Later jobs must use the station chosen for this episode too.
+            # A fill, manual cook and plate-out can be three separate jobs.
+            self.committed.update(id(step) for _, step in job.steps)
+            for episode, station in moves.items():
+                self.moved[episode] = station
+                original = _station_of(self.steps[episode])
+                if station != original:
+                    interval = (episode, self.episode_end[episode])
+                    self.busy[original].remove(interval)
+                    self.busy.setdefault(station, []).append(interval)
             start = free[c]
             for _, step in new_steps:
                 result.append(((start, seq), step))
@@ -645,13 +655,14 @@ class _Dispatcher:
             if self.episode_of.get(id(other)) == episode
         ):
             original = _station_of(step)
-            start, end = episode, self.episode_end[episode]
+            episode_start, episode_end = episode, self.episode_end[episode]
             options = [original] + [
                 spare
                 for spare in self.spares.get(original, [])
                 if self.k.station_by_symbol[spare].location in self.reach[c]
                 and not any(
-                    a <= end and start <= b for a, b in self.busy.get(spare, [])
+                    a <= episode_end and episode_start <= b
+                    for a, b in self.busy.get(spare, [])
                 )
             ]
             target = min(

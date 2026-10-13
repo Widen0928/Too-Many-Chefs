@@ -4,10 +4,9 @@ Execution is deterministic: planning costs no timesteps, and the controller
 turns a plan into moves with a fixed navigation policy. So a plan can be run
 forward on a copy of the kitchen, with the very same policy and simulator, to
 see what it would achieve: how many orders it serves, how many points it
-earns, how long it takes, and whether the chefs end up jammed. When two chefs
-block each other in a dead end the navigation policy gives up with an
-``AgentDeadlockError``, which ends the whole run; a rollout catches it here
-instead, so that plan can be passed over.
+earns, how long it takes, and whether the chefs end up jammed. Older navigation
+policies raise ``AgentDeadlockError`` when chefs cannot escape a dead end;
+rollouts still catch that error when the installed template provides it.
 
 ``from_pddl.py`` builds a few variations of the same plan (who does which
 job) and keeps the one whose rollout scores best.
@@ -24,6 +23,14 @@ from simulator.mutations import MutationWithLocation
 
 # Rollouts stop after this many timesteps.
 MAX_TICKS = 600
+
+
+def navigation_deadlock_errors() -> tuple[type[Exception], ...]:
+    """Catch legacy deadlocks without requiring the removed template class."""
+    from controllers.navigation import traffic
+
+    error = getattr(traffic, "AgentDeadlockError", None)
+    return (error,) if error is not None else ()
 
 
 @dataclass(frozen=True)
@@ -50,9 +57,9 @@ def simulate(
     max_ticks: int = MAX_TICKS,
 ) -> Outcome:
     from controllers.navigation import DefaultMutationInterpolationPolicy
-    from controllers.navigation.traffic import AgentDeadlockError
     from controllers.pddl.controller import group_mutations_by_agent
 
+    deadlock_errors = navigation_deadlock_errors()
     start = _state(environment)
     agent_ids = [
         agent.id
@@ -83,7 +90,7 @@ def simulate(
                 actions, plans = policy.get_mutations(plans, env, context)
                 if actions:
                     break
-        except AgentDeadlockError:
+        except deadlock_errors:
             crashed = True
             break
         if not actions:

@@ -264,7 +264,10 @@ def _reorder_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    on = isinstance(chosen, str) and chosen.removesuffix("swap").removesuffix("w").endswith("r")
+    on = (
+        isinstance(chosen, str)
+        and chosen.removesuffix("swap").removesuffix("w").removesuffix("b").endswith("r")
+    )
     if not _ANNOUNCED:
         _ANNOUNCED.append(True)
         import sys
