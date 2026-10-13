@@ -133,9 +133,9 @@ def prefetch_bun_candidates(kitchen: Kitchen, steps: list[PDDLPlanStep]):
                if step.name == "take_food_onto_dish"
                and step.parameters[2] == bun_food
                and step.parameters[3] == "p_grilled_meat"]
-    if len(targets) < 3:
+    if not targets:
         return
-    first, third = targets[0], targets[2]
+    first = targets[0]
     used = {part for step in steps for part in step.parameters if part.startswith("loc_")}
     chefs = [chef_symbol(chef.id) for chef in kitchen.chefs]
     pan = burning[0].location
@@ -150,6 +150,28 @@ def prefetch_bun_candidates(kitchen: Kitchen, steps: list[PDDLPlanStep]):
             - (abs(loc[0] - pan[0]) + abs(loc[1] - pan[1]))),
         loc,
     ))
+    if len(targets) == 1:
+        original = steps[first]
+        helper = next((chef for chef in chefs if chef != original.parameters[0]), None)
+        if helper is None:
+            return
+        for counter in sorted(counters, key=lambda loc: (
+                abs(loc[0] - pan[0]) + abs(loc[1] - pan[1]), loc))[:4]:
+            loc = loc_symbol(counter)
+            replacement = PDDLPlanStep(
+                "counter_food_onto_plate",
+                (original.parameters[0], loc, bun_food,
+                 original.parameters[3], original.parameters[4]),
+            )
+            yield [
+                PDDLPlanStep("take_food", (helper, loc_symbol(bun_loc), bun_food)),
+                PDDLPlanStep("put_down", (helper, loc, bun_food)),
+                *steps[:first], replacement, *steps[first + 1:],
+            ]
+        return
+    if len(targets) < 3:
+        return
+    third = targets[2]
     for first_counter in counters[:3]:
         for third_counter in counters[:3]:
             if first_counter == third_counter:
