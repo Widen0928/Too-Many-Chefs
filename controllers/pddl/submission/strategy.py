@@ -245,6 +245,11 @@ def strategy_options(environment: Environment, options: list) -> list:
         )
         if has_chain and "3rb" not in options:
             options.insert(options.index("3r") + 1, "3rb")
+        # A short first ticket can block a feasible four-dish plan. Also
+        # compare planning the complete queue with a local deadline swap;
+        # a full rollout rejects it when the urgent ticket is still better.
+        if has_chain and len(queue.visible) >= 4 and "swap" not in options:
+            options.insert(options.index("3rb") + 1, "swap")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives

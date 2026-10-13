@@ -84,6 +84,7 @@ def test_translator_recovers_reordering_from_swap_policy_in_another_worker(monke
 
 @pytest.mark.parametrize('policy, swaps, reorder', [
     ('3r', False, True), ('3rswap', True, True), ('3rw', True, True), ('3w', True, False),
+    ('swap', True, False),
 ])
 def test_selected_policy_controls_swapping_in_planning_worker(monkeypatch, policy, swaps, reorder):
     env = environment()
