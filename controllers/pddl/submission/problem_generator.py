@@ -88,6 +88,9 @@ class DefaultProblemGenerator(ProblemGenerator):
             # follows the remembered strategy into every planning worker.
             deadline_alternatives = True
             strategy = strategy[:-4] if strategy.endswith("swap") else strategy[:-1]
+        parallel_orders = isinstance(strategy, str) and strategy.endswith("p")
+        if parallel_orders:
+            strategy = strategy[:-1]
         batch = isinstance(strategy, str) and strategy.endswith("b")
         if batch:
             strategy = strategy[:-1]
@@ -130,7 +133,8 @@ class DefaultProblemGenerator(ProblemGenerator):
             models = {"both": (True, False), "fast": (True,), "safe": (False,)}
             for fast in models.get(model_choice, (True, False)):
                 problem = PDDLProblem(
-                    domain=domain, problem=build_problem(kitchen, entries, fast=fast)
+                    domain=domain, problem=build_problem(kitchen, entries, fast=fast,
+                                                         parallel_orders=parallel_orders)
                 )
                 last = last or problem
                 # The tip-keeping model is much harder to plan in divided
@@ -412,7 +416,8 @@ def build_domain() -> str:
 
 
 def build_problem(
-    kitchen: Kitchen, entries: list | None = None, fast: bool = False
+    kitchen: Kitchen, entries: list | None = None, fast: bool = False,
+    parallel_orders: bool = False,
 ) -> str:
     problem = ProblemBuilder(domain_name="overcooked", problem_name="kitchen")
     describe_food_and_plates(kitchen, problem)
@@ -423,7 +428,7 @@ def build_problem(
     describe_dispensers(kitchen, problem)
     if entries is None:
         entries = feasible_orders(kitchen, queued_orders(kitchen))
-    describe_orders(kitchen, problem, entries)
+    describe_orders(kitchen, problem, entries, parallel_orders=parallel_orders)
     if fast:
         problem.add_fact("(fast_plating)")
     return problem.to_pddl()
@@ -724,7 +729,8 @@ def batch_orders(kitchen: Kitchen, entries: list) -> list:
     return [entry for group in groups.values() for entry in group]
 
 
-def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list) -> None:
+def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list,
+                    *, parallel_orders: bool = False) -> None:
     """One order object per planned order, each with a goal to serve it;
     serving one opens the next (see ``queued_orders``)."""
     end = problem.add_object("o_end", "order")
@@ -732,13 +738,15 @@ def describe_orders(kitchen: Kitchen, problem: ProblemBuilder, entries: list) ->
     for index, entry in enumerate(entries):
         order = problem.add_object(f"o{index}", "order")
         problem.add_fact(f"(wants {order} {plate_symbol(entry.name)})")
-        if previous is None:
+        if previous is None or parallel_orders:
             problem.add_fact(f"(open {order})")
-        if previous is not None:
+        if previous is not None and not parallel_orders:
             problem.add_fact(f"(next_order {previous} {order})")
+        if parallel_orders:
+            problem.add_fact(f"(next_order {order} {end})")
         problem.add_goal(f"(served {order})")
         previous = order
-    if previous is not None:
+    if previous is not None and not parallel_orders:
         problem.add_fact(f"(next_order {previous} {end})")
 
 

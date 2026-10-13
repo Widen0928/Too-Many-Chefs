@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from controllers.pddl.submission import config, from_pddl, problem_generator, strategy
+from controllers.pddl.submission.kitchen import Kitchen
 from simulator.configuration import load, load_configuration
 from simulator.entities import OvercookedState
 from simulator.entities.orders import OrderEntry, OrderQueue
@@ -126,10 +127,25 @@ def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monke
 def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_duplicated():
     options = [3, "3r", 2, None, "3w"]
     selected = strategy.strategy_options(burning_kitchen(), options)
-    assert selected == [3, "3r", "3rb", "swap", 2, None, "3w"]
+    assert selected == [3, "3r", "3rb", "swap", "4p", 2, None, "3w"]
     assert options == [3, "3r", 2, None, "3w"]
     assert strategy.strategy_options(burning_kitchen(), selected).count("3rb") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swap") == 1
+    assert strategy.strategy_options(burning_kitchen(), selected).count("4p") == 1
+
+
+def test_parallel_candidate_can_deliver_any_visible_ticket():
+    kitchen = Kitchen(burning_kitchen())
+    entries = problem_generator.queued_orders(kitchen)
+    serial = problem_generator.build_problem(kitchen, entries, fast=True)
+    parallel = problem_generator.build_problem(
+        kitchen, entries, fast=True, parallel_orders=True
+    )
+    assert "(next_order o0 o1)" in serial
+    assert "(next_order o0 o1)" not in parallel
+    for index in range(len(entries)):
+        assert f"(open o{index})" in parallel
+        assert f"(next_order o{index} o_end)" in parallel
 
 
 @pytest.mark.parametrize("restriction", [
