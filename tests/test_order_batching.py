@@ -127,11 +127,19 @@ def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monke
 def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_duplicated():
     options = [3, "3r", 2, None, "3w"]
     selected = strategy.strategy_options(burning_kitchen(), options)
-    assert selected == [3, "3r", "3rb", "swap", "4p", 2, None, "3w"]
+    assert selected == [3, "3r", "3rb", "swap", "4rq5", 2, None, "3w"]
     assert options == [3, "3r", 2, None, "3w"]
     assert strategy.strategy_options(burning_kitchen(), selected).count("3rb") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swap") == 1
-    assert strategy.strategy_options(burning_kitchen(), selected).count("4p") == 1
+    assert strategy.strategy_options(burning_kitchen(), selected).count("4rq5") == 1
+
+
+def test_four_ticket_permutation_serves_cheeseburgers_first():
+    kitchen = Kitchen(burning_kitchen())
+    entries, _ = next(problem_generator.goal_sets(kitchen, horizon=4, order_pattern=5))
+    assert [entry.name.rsplit("/", 1)[-1] for entry in entries] == [
+        "cheeseburger", "cheeseburger", "hamburger", "hamburger"
+    ]
 
 
 def test_parallel_candidate_can_deliver_any_visible_ticket():
@@ -183,3 +191,4 @@ def test_batch_candidate_is_not_added_outside_supported_kitchens(monkeypatch, re
         monkeypatch.setattr(config, "CONFIG", replace(config.CONFIG, select_order_batches=False))
     environment = environment.replace_entity(state.copy_with(order_queue=queue))
     assert "3rb" not in strategy.strategy_options(environment, options)
+    assert "4rq5" not in strategy.strategy_options(environment, options)

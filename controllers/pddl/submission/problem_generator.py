@@ -91,6 +91,10 @@ class DefaultProblemGenerator(ProblemGenerator):
         parallel_orders = isinstance(strategy, str) and strategy.endswith("p")
         if parallel_orders:
             strategy = strategy[:-1]
+        order_pattern = None
+        if isinstance(strategy, str) and len(strategy) >= 2 and strategy[-2] == "q" and strategy[-1].isdigit():
+            order_pattern = int(strategy[-1])
+            strategy = strategy[:-2]
         batch = isinstance(strategy, str) and strategy.endswith("b")
         if batch:
             strategy = strategy[:-1]
@@ -122,7 +126,10 @@ class DefaultProblemGenerator(ProblemGenerator):
             problem = PDDLProblem(domain=domain, problem=tips)
             if probe(problem, LATER_PROBE_SECONDS):
                 return problem
-        candidates = goal_sets(kitchen, horizon, batch=True) if batch else goal_sets(kitchen, horizon)
+        goal_options = {"batch": True} if batch else {}
+        if order_pattern is not None:
+            goal_options["order_pattern"] = order_pattern
+        candidates = goal_sets(kitchen, horizon, **goal_options)
         for entries, seconds in candidates:
             if not entries:
                 return PDDLProblem(domain=domain, problem=build_problem(kitchen, entries))
@@ -338,7 +345,8 @@ FIRST_PROBE_SECONDS = 10.0
 LATER_PROBE_SECONDS = 4.0
 
 
-def goal_sets(kitchen: Kitchen, horizon: int | None = None, *, batch: bool = False):
+def goal_sets(kitchen: Kitchen, horizon: int | None = None, *, batch: bool = False,
+              order_pattern: int | None = None):
     """Goal sets to try, best first, each with a time limit for checking it.
 
     A problem with an unreachable goal gives no plan at all and the chefs
@@ -349,6 +357,13 @@ def goal_sets(kitchen: Kitchen, horizon: int | None = None, *, batch: bool = Fal
     queue = queued_orders(kitchen)
     if batch:
         queue = batch_orders(kitchen, queue)
+    if (order_pattern is not None and len(queue) == 4
+            and kitchen.state.order_queue.order_reveal == "all"
+            and not kitchen.state.order_queue.strict_ordering):
+        patterns = ((0, 1, 2, 3), (0, 2, 1, 3), (0, 1, 3, 2),
+                    (1, 0, 2, 3), (1, 0, 3, 2), (1, 3, 0, 2))
+        if 0 <= order_pattern < len(patterns):
+            queue = [queue[index] for index in patterns[order_pattern]]
     feasible = feasible_orders(kitchen, queue)[:horizon]
     tried: list[list] = []
     seconds = FIRST_PROBE_SECONDS

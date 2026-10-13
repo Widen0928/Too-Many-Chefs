@@ -250,8 +250,8 @@ def strategy_options(environment: Environment, options: list) -> list:
         # a full rollout rejects it when the urgent ticket is still better.
         if has_chain and len(queue.visible) >= 4 and "swap" not in options:
             options.insert(options.index("3rb") + 1, "swap")
-        if has_chain and len(queue.visible) >= 4 and "4p" not in options:
-            options.insert(options.index("swap") + 1, "4p")
+        if has_chain and len(queue.visible) == 4 and "4rq5" not in options:
+            options.insert(options.index("swap") + 1, "4rq5")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
