@@ -66,6 +66,7 @@ class DefaultFromPDDL(FromPDDL):
         PREFETCH[0] = _prefetch_for(self._environment)
         PAIR[0] = _pair_for(self._environment)
         NEXT_PREP[0] = _next_prep_for(self._environment)
+        STAGED[0] = _staged_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -73,14 +74,23 @@ class DefaultFromPDDL(FromPDDL):
             LAST_EXPIRED[0] = rest[0] if rest else 0
             return key, self.translate_all(kitchen, chosen, left_out)
         best: tuple | None = None
-        options_list = [Options()] if quick else candidate_options(kitchen, steps)
+        plans = [steps]
+        if STAGED[0] and not quick:
+            staged = staged_steps(kitchen, steps)
+            if staged is not None and staged != steps:
+                plans.append(staged)
+        options_list = [
+            (plan, options)
+            for plan in plans
+            for options in ([Options()] if quick else candidate_options(kitchen, plan))
+        ]
         best_steps: list[PDDLPlanStep] = steps
         seen: list[list] = []
-        for options in options_list:
+        for plan_steps, options in options_list:
             if options is None:
-                chosen = steps  # the planner's own assignment
+                chosen = plan_steps  # the planner's own assignment
             else:
-                chosen = dispatch(kitchen, steps, options)
+                chosen = dispatch(kitchen, plan_steps, options)
             if chosen in seen:
                 continue
             seen.append(chosen)
@@ -135,6 +145,31 @@ class DefaultFromPDDL(FromPDDL):
         if plan and left_out:
             plan.append(_wait_to_replan(plan[-1]))
         return plan
+
+def staged_steps(kitchen: Kitchen, steps: list[PDDLPlanStep]) -> list[PDDLPlanStep] | None:
+    """The same orders as ``steps`` serves, planned one at a time (staged.py)."""
+    from controllers.pddl.interfaces import PDDLProblem
+
+    from .problem_generator import LATER_PROBE_SECONDS, build_domain, build_problem, probe, queued_orders
+    from .staged import staged_plan
+
+    dishes = [step.parameters[2] for step in steps if step.name.startswith("deliver")]
+    if len(dishes) < 2:
+        return None
+    entries, queue = [], list(queued_orders(kitchen))
+    for dish in dishes:
+        entry = next((e for e in queue if plate_symbol(e.name) == dish), None)
+        if entry is None:
+            return None
+        queue.remove(entry)
+        entries.append(entry)
+    fast = any(step.name == "take_food_onto_dish" for step in steps)
+    problem = PDDLProblem(domain=build_domain(), problem=build_problem(kitchen, entries, fast=fast))
+    try:
+        return staged_plan(problem, len(entries), lambda q: probe(q, LATER_PROBE_SECONDS))
+    except Exception:  # noqa: BLE001 - the planner's own plan still stands
+        return None
+
 
 def prefetch_next_order_meat(
     kitchen: Kitchen, steps: list[PDDLPlanStep]
@@ -381,7 +416,7 @@ def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | Non
         text = (
             _cache_namespace() + canonical(environment) + repr(steps)
             + repr(CONFIG) + repr(REORDER[0]) + repr(PREFETCH[0])
-            + repr(PAIR[0]) + repr(NEXT_PREP[0])
+            + repr(PAIR[0]) + repr(NEXT_PREP[0]) + repr(STAGED[0])
         )
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
@@ -482,6 +517,18 @@ REORDER = [False, False]
 PREFETCH = [False, False]
 PAIR = [False, False]
 NEXT_PREP = [False, False]
+STAGED = [False, False]
+
+
+def _staged_for(environment) -> bool:
+    if STAGED[1]:
+        return STAGED[0]
+    try:
+        from .strategy import fingerprint, remembered, strategy_flags
+
+        return strategy_flags(remembered(fingerprint(environment)))["staged"]
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _next_prep_for(environment) -> bool:
@@ -579,6 +626,11 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
         # level by strategy selection (it helps some kitchens, not others).
         for split in (True, False):
             yield Options(reorder=True, split_cooks=split, split_plates=split)
+    if STAGED[0]:
+        # Staged plans list the orders by urgency: keep to that order.
+        for split in (True, False):
+            yield Options(reorder=True, urgent=True, split_cooks=split, split_plates=False)
+        yield Options(reorder=True, urgent=True)
     yield Options(park_dishes=True)
     yield Options(move_stations="off", park_dishes=True)
     yield None

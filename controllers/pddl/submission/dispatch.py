@@ -107,6 +107,10 @@ class Options:
     keep_tips: bool = False
     # Schedule jobs by their dependencies rather than in plan order.
     reorder: bool = False
+    # With reorder: of the jobs free to go, the earliest in the plan goes
+    # next rather than the one that can finish soonest. A staged plan
+    # (staged.py) lists the most urgent order's jobs first.
+    urgent: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
     exclude: frozenset[str] = frozenset()
     # Only the chefs the plan names may get jobs (Part 4: one chef each).
@@ -550,6 +554,8 @@ class _Dispatcher:
                     if trial is None:
                         continue
                     key = (trial[0], job.steps[0][0], c != job.chef)
+                    if self.options.urgent:
+                        key = (job.steps[0][0], trial[0], c != job.chef)
                     if best is None or key < best[0]:
                         best = (key, job, c, trial)
             if best is None:

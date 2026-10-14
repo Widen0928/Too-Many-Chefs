@@ -53,7 +53,7 @@ def main() -> None:
             f"{Path(level).parent.name[:2]}/{Path(level).stem:55s} "
             f"score={result.get('score', 0):4} delivered={result.get('orders_delivered', 0)}"
             f" left={result.get('orders_remaining', '?')} t={result.get('timesteps', '?'):>4}"
-            f" {result.get('reason')} {msg}"
+            f" e={result.get('elapsed_seconds', 0) or 0:5.1f}s {result.get('reason')} {msg}"
         )
         total += result.get("score", 0) or 0
     print("TOTAL", total)

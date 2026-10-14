@@ -85,6 +85,9 @@ class DefaultProblemGenerator(ProblemGenerator):
         farm_tips = isinstance(strategy, str) and strategy.endswith("tipfarm")
         if farm_tips:
             strategy = strategy[:-len("tipfarm")]
+        staged = isinstance(strategy, str) and strategy.endswith("g")
+        if staged:
+            strategy = strategy[:-1]
         prefetch_next = isinstance(strategy, str) and strategy.endswith("prep")
         if prefetch_next:
             strategy = strategy[:-4]
@@ -124,6 +127,8 @@ class DefaultProblemGenerator(ProblemGenerator):
         _from_pddl.PAIR[1] = True
         _from_pddl.NEXT_PREP[0] = prefetch_next
         _from_pddl.NEXT_PREP[1] = True
+        _from_pddl.STAGED[0] = staged
+        _from_pddl.STAGED[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safer"):
                 model_choice = "safe"

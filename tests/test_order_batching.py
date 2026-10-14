@@ -171,7 +171,7 @@ def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monke
 def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_duplicated():
     options = [3, "3r", 2, None, "3w"]
     selected = strategy.strategy_options(burning_kitchen(), options)
-    assert selected == [3, "3r", "3rb", "3safer", "1r", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep", "swapbuns", "1buns", "2buns", "4rq2", "4rq5", None]
+    assert selected == [3, "3r", "4rg", "3rb", "3safer", "1r", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep", "2rg", "swapbuns", "1buns", "2buns", "4rq2", "4rq5", None]
     assert options == [3, "3r", 2, None, "3w"]
     assert strategy.strategy_options(burning_kitchen(), selected).count("3rb") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swap") == 1
@@ -181,6 +181,8 @@ def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_d
     for pattern in ("4rq2", "4rq1", "4rq4"):
         assert strategy.strategy_options(burning_kitchen(), selected).count(pattern) == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("4rq5") == 1
+    assert strategy.strategy_options(burning_kitchen(), selected).count("4rg") == 1
+    assert strategy.strategy_options(burning_kitchen(), selected).count("2rg") == 1
 
 
 def test_four_ticket_permutation_serves_cheeseburgers_first():

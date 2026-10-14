@@ -52,6 +52,9 @@ class Config:
     # Compare grouping identical dishes as a separate whole-level policy
     # in timed kitchens with cooking chains. Keep deadline sorting available.
     select_order_batches: bool = True
+    # Also compare planning the orders one at a time (staged.py) in kitchens
+    # whose stations burn food.
+    select_staged: bool = True
 
 
 def load() -> Config:

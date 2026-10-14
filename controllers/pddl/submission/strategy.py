@@ -298,6 +298,19 @@ def strategy_options(environment: Environment, options: list) -> list:
             # The first two stay as before (they earn the current server score).
             first = [3, "3r", "3rb", "3safer", "1r", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep"]
             options = first + [o for o in options if o not in first]
+    if CONFIG.select_staged and len([*queue.visible, *queue.pending]) >= 2 and "3r" in options:
+        from .kitchen import Kitchen
+
+        kitchen = Kitchen(environment)
+        if any(kitchen.burns(station) for station in kitchen.stations):
+            # Planning the orders one at a time keeps the urgent dish first
+            # (staged.py). On 60 harder burger kitchens this saved a whole
+            # order in several of them.
+            if "4rg" not in options:
+                options.insert(min(2, len(options)), "4rg")
+            if "2rg" not in options:
+                at = options.index("3rbprep") + 1 if "3rbprep" in options else len(options)
+                options.insert(at, "2rg")
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
@@ -325,17 +338,22 @@ def _rush(environment: Environment) -> bool:
 
 def strategy_flags(strategy) -> dict:
     """What a strategy name switches on in the plan translator: list
-    scheduling, bun prefetching, paired prefetching and next-order prep.
+    scheduling, bun prefetching, paired prefetching, next-order prep and
+    planning the orders one at a time (staged).
 
     Parses the suffixes in the same order as the problem generator
     (problem_generator.DefaultProblemGenerator.to_pddl), so the translating
     worker process applies exactly what the strategy was played out with.
     """
-    flags = {"reorder": False, "prefetch": False, "pair": False, "next_prep": False}
+    flags = {"reorder": False, "prefetch": False, "pair": False, "next_prep": False,
+             "staged": False}
     if not isinstance(strategy, str):
         return flags
     if strategy.endswith("tipfarm"):
         strategy = strategy[: -len("tipfarm")]
+    if strategy.endswith("g"):
+        flags["staged"] = True
+        strategy = strategy[:-1]
     if strategy.endswith("prep"):
         flags["next_prep"] = True
         strategy = strategy[:-4]
