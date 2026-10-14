@@ -28,6 +28,10 @@ _DIR = Path(tempfile.gettempdir()) / "too-many-chefs-strategy"
 # HARD_CAP_SECONDS.
 SELECTION_SECONDS = 30.0
 HARD_CAP_SECONDS = 40.0
+# When every play-out so far took under FAST_PLAYOUT_SECONDS, selection may
+# go on until FAST_LEVEL_SECONDS.
+FAST_PLAYOUT_SECONDS = 4.0
+FAST_LEVEL_SECONDS = 40.0
 
 
 def fingerprint(environment: Environment) -> str:
@@ -181,9 +185,11 @@ def choose_horizon(environment: Environment, options: list) -> object:
         # The server stops a Level 3 run after 90 s (Level 2: 60 s), and the
         # run itself takes a while: stop once past the budget, or before a
         # play-out that would likely end past the hard cap.
-        if best is not None and (
-            spent > _selection_seconds() or spent + longest > HARD_CAP_SECONDS
-        ):
+        # Quick play-outs (a short level) may use more of the time limit,
+        # since the run after selection is short too.
+        budget = FAST_LEVEL_SECONDS if longest < FAST_PLAYOUT_SECONDS else _selection_seconds()
+        cap = FAST_LEVEL_SECONDS if longest < FAST_PLAYOUT_SECONDS else HARD_CAP_SECONDS
+        if best is not None and (spent > budget or spent + longest > cap):
             break
         began = time.monotonic()
         try:
@@ -285,6 +291,13 @@ def strategy_options(environment: Environment, options: list) -> list:
             options.insert(options.index("3r") + 1, "4rq4")
             options.remove("3rbprep")
             options.insert(options.index("3rb") + 1, "3rbprep")
+            # Measured on 150 variants of the burning kitchen (shuffled
+            # stations, tight and sequential tickets): these, in this order,
+            # reach the best play-out of every variant; the server may stop
+            # trying strategies before the end of the list.
+            # The first two stay as before (they earn the current server score).
+            first = [3, "3r", "3rb", "3safer", "1r", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep"]
+            options = first + [o for o in options if o not in first]
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
