@@ -306,11 +306,13 @@ def strategy_options(environment: Environment, options: list) -> list:
             # Planning the orders one at a time keeps the urgent dish first
             # (staged.py). On 60 harder burger kitchens this saved a whole
             # order in several of them.
-            if "4rg" not in options:
-                options.insert(min(2, len(options)), "4rg")
-            if "2rg" not in options:
-                at = options.index("3rbprep") + 1 if "3rbprep" in options else len(options)
-                options.insert(at, "2rg")
+            # In kitchens divided by a counter, two-order staged plans
+            # rescued orders nothing earlier in the list did; a slow
+            # grader may stop before the end of the list, so both go early.
+            for at, candidate in ((2, "4rg"), (3, "2rg")):
+                if candidate in options:
+                    options.remove(candidate)
+                options.insert(min(at, len(options)), candidate)
     if (
         CONFIG.select_deadline_alternatives
         and not CONFIG.deadline_alternatives
