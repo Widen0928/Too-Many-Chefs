@@ -493,7 +493,9 @@ def _next_prep_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    return isinstance(chosen, str) and chosen.endswith("prep")
+    from .strategy import strategy_flags
+
+    return strategy_flags(chosen)["next_prep"]
 
 
 def _pair_for(environment) -> bool:
@@ -505,7 +507,9 @@ def _pair_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    return chosen == "2buns"
+    from .strategy import strategy_flags
+
+    return strategy_flags(chosen)["pair"]
 
 
 def _prefetch_for(environment) -> bool:
@@ -517,7 +521,9 @@ def _prefetch_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    return isinstance(chosen, str) and chosen.endswith("buns")
+    from .strategy import strategy_flags
+
+    return strategy_flags(chosen)["prefetch"]
 
 
 def _reorder_for(environment) -> bool:
@@ -529,11 +535,9 @@ def _reorder_for(environment) -> bool:
         chosen = remembered(fingerprint(environment))
     except Exception:  # noqa: BLE001
         return False
-    on = (
-        isinstance(chosen, str)
-        and chosen.removesuffix("prep").removesuffix("swap")
-        .removesuffix("w").removesuffix("b").endswith("r")
-    )
+    from .strategy import strategy_flags
+
+    on = strategy_flags(chosen)["reorder"]
     if not _ANNOUNCED:
         _ANNOUNCED.append(True)
         import sys

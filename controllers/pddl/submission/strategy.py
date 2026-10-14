@@ -308,3 +308,42 @@ def _rush(environment: Environment) -> bool:
         return False
     limits = [e.time_limit for e in entries if e.time_limit is not None]
     return queue.order_reveal == "sequential" or bool(limits and min(limits) <= 30)
+
+
+def strategy_flags(strategy) -> dict:
+    """What a strategy name switches on in the plan translator: list
+    scheduling, bun prefetching, paired prefetching and next-order prep.
+
+    Parses the suffixes in the same order as the problem generator
+    (problem_generator.DefaultProblemGenerator.to_pddl), so the translating
+    worker process applies exactly what the strategy was played out with.
+    """
+    flags = {"reorder": False, "prefetch": False, "pair": False, "next_prep": False}
+    if not isinstance(strategy, str):
+        return flags
+    if strategy.endswith("tipfarm"):
+        strategy = strategy[: -len("tipfarm")]
+    if strategy.endswith("prep"):
+        flags["next_prep"] = True
+        strategy = strategy[:-4]
+    flags["pair"] = strategy == "2buns"
+    if strategy.endswith("buns"):
+        flags["prefetch"] = True
+        strategy = strategy[:-4]
+    if strategy.endswith("swap"):
+        strategy = strategy[:-4]
+    elif strategy.endswith("w"):
+        strategy = strategy[:-1]
+    if strategy.endswith("p"):
+        strategy = strategy[:-1]
+    if len(strategy) >= 2 and strategy[-2] == "q" and strategy[-1].isdigit():
+        strategy = strategy[:-2]
+    if strategy.endswith("b"):
+        strategy = strategy[:-1]
+    if strategy.endswith("safer"):
+        flags["reorder"] = True
+    elif strategy.endswith("safe"):
+        pass
+    elif strategy.endswith("r"):
+        flags["reorder"] = True
+    return flags
