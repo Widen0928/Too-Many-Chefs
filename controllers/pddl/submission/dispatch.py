@@ -111,6 +111,10 @@ class Options:
     # next rather than the one that can finish soonest. A staged plan
     # (staged.py) lists the most urgent order's jobs first.
     urgent: bool = False
+    # Rewrite "storage food straight onto a dish" (which loses the tip for
+    # the new dish) as a separate job, for any chef, that sets the food on
+    # a free counter beforehand; the dish chef takes it from there.
+    prestage: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
     exclude: frozenset[str] = frozenset()
     # Only the chefs the plan names may get jobs (Part 4: one chef each).
@@ -313,6 +317,19 @@ class _Dispatcher:
                     out.append(job)
                     open_jobs[c] = job
             emptied.pop(c, None)
+            if (step.name == "take_food_onto_dish" and self.options.prestage
+                    and step.parameters[3] != "p_empty"):
+                _, loc, food, plate, dish = step.parameters
+                spot = self._park_spot(_target(step), index - 0.6, index)
+                if spot is not None:
+                    out.append(Job(chef=c, steps=[
+                        (index - 0.6, PDDLPlanStep("take_food", (c, loc, food))),
+                        (index - 0.5, PDDLPlanStep("put_down", (c, spot, food))),
+                    ]))
+                    job.steps.append(
+                        (index, PDDLPlanStep("counter_food_onto_plate", (c, spot, food, plate, dish)))
+                    )
+                    continue
             if step.name == "take_food_onto_dish" and self.options.keep_tips:
                 spot = self._park_spot(_target(step), index - 0.4, index)
                 if spot is not None:

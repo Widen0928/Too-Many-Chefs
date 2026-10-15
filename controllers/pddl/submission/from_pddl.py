@@ -86,6 +86,7 @@ class DefaultFromPDDL(FromPDDL):
         ]
         best_steps: list[PDDLPlanStep] = steps
         seen: list[list] = []
+        staged_tips: list = []
         for plan_steps, options in options_list:
             if options is None:
                 chosen = plan_steps  # the planner's own assignment
@@ -96,7 +97,18 @@ class DefaultFromPDDL(FromPDDL):
             seen.append(chosen)
             plan = self.translate_all(kitchen, chosen, left_out)
             outcome = simulate(self._environment, plan)
+            if options is not None and options.prestage:
+                staged_tips.append((outcome, plan, chosen))
+                continue
             if best is None or outcome.key() > best[0]:
+                best = (outcome.key(), plan)
+                best_steps = chosen
+                expired = outcome.expired
+        for outcome, plan, chosen in staged_tips:
+            # A tip is worth one point; a later finish can cost the next
+            # order. Pre-staged food must come for free: no slower than the
+            # best plan without it.
+            if best is None or (outcome.key() > best[0] and outcome.key()[3] >= best[0][3] - 1):
                 best = (outcome.key(), plan)
                 best_steps = chosen
                 expired = outcome.expired
@@ -631,6 +643,14 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
         for split in (True, False):
             yield Options(reorder=True, urgent=True, split_cooks=split, split_plates=False)
         yield Options(reorder=True, urgent=True)
+        if any(step.name == "take_food_onto_dish" for step in steps):
+            # The same, winning back the tips the quick model gives up.
+            for split in (True, False):
+                yield Options(reorder=True, urgent=True, keep_tips=True,
+                              split_cooks=split, split_plates=False)
+            for split in (True, False):
+                yield Options(reorder=True, urgent=True, prestage=True,
+                              split_cooks=split, split_plates=False)
     yield Options(park_dishes=True)
     yield Options(move_stations="off", park_dishes=True)
     yield None
@@ -662,10 +682,15 @@ def _wait_to_replan(last: MutationWithLocation) -> MutationWithLocation:
     generator notices and replans for the orders this plan left out. Without
     it the controller would finish with those orders unserved.
     """
+    # Both names: picking up a plate or other portable item from a counter
+    # only checks the equipment name, so a plan ending with a plate set
+    # down would otherwise pick it straight back up and stop.
+    never = "(replan for the remaining orders)"
     return MutationWithLocation(
         mutation=PickUp(
             agent_id=last.mutation.agent_id,  # type: ignore[attr-defined]
-            expected_input_name="(replan for the remaining orders)",
+            expected_input_name=never,
+            expected_held_equipment_name=never,
         ),
         location=last.location,
     )
