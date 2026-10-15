@@ -305,8 +305,11 @@ def strategy_options(environment: Environment, options: list) -> list:
         burning = any(kitchen.burns(station) for station in kitchen.stations)
         if not burning and CONFIG.select_staged_all and len([*queue.visible, *queue.pending]) >= 3:
             # Elsewhere staged plans mostly win back tips (pre-staged
-            # food); they are tried after the usual strategies.
-            for candidate in ("4rg", "3rg", "6rg"):
+            # food). 4rg was the best of them; a busy grader may stop
+            # selecting before the end of the list, so it goes second.
+            if "4rg" not in options:
+                options.insert(min(1, len(options)), "4rg")
+            for candidate in ("3rg", "6rg"):
                 if candidate not in options:
                     options.append(candidate)
         if burning:
