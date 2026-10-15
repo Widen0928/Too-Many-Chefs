@@ -55,6 +55,8 @@ class Config:
     # Also compare planning the orders one at a time (staged.py) in kitchens
     # whose stations burn food.
     select_staged: bool = True
+    # Also compare staged plans in kitchens where nothing burns.
+    select_staged_all: bool = True
 
 
 def load() -> Config:

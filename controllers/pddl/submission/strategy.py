@@ -302,7 +302,14 @@ def strategy_options(environment: Environment, options: list) -> list:
         from .kitchen import Kitchen
 
         kitchen = Kitchen(environment)
-        if any(kitchen.burns(station) for station in kitchen.stations):
+        burning = any(kitchen.burns(station) for station in kitchen.stations)
+        if not burning and CONFIG.select_staged_all and len([*queue.visible, *queue.pending]) >= 3:
+            # Elsewhere staged plans mostly win back tips (pre-staged
+            # food); they are tried after the usual strategies.
+            for candidate in ("4rg", "3rg", "6rg"):
+                if candidate not in options:
+                    options.append(candidate)
+        if burning:
             # Planning the orders one at a time keeps the urgent dish first
             # (staged.py). On 60 harder burger kitchens this saved a whole
             # order in several of them.
