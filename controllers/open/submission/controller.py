@@ -112,6 +112,11 @@ PRUNED_TICKS = float(__import__("os").environ.get("L4_PRUNED_TICKS", "1"))
 # After getting stuck, plan the same dish again first.
 STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # Local evaluation only: print plans started and dishes served.
+# Give up a dish early on once the teammate is visibly making it too (holds
+# or has put down food only that dish needs), so the two do not race for
+# the same ticket and one of them throw its work away.
+YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -271,6 +276,9 @@ class OpenController(Controller):
                 self._failed[target] = environment.timestep
 
         visible = {entry.name for entry in state.order_queue.visible}
+        if YIELD and self._future is None and self._plan and self._mate_makes_target(environment, chef, state):
+            self._why = "mate"
+            self._stuck = STUCK_TICKS + 1
         if self._future is None and environment.timestep >= self._idle_until and (
             not self._plan
             or (self._target is not None and self._target not in visible)
@@ -322,6 +330,27 @@ class OpenController(Controller):
         if not self._plan or environment.timestep < self._hold_until:
             return []
         return self._follow(environment, chef)
+
+    def _mate_makes_target(self, environment: Environment, chef: Agent, state) -> bool:
+        """Whether a teammate visibly makes the dish we are only starting,
+        with no second ticket for it."""
+        if self._target is None or not self._steps or not self._step_of:
+            return False
+        step = self._step_of[0]
+        if step < 0 or step >= len(self._steps) * YIELD_FRACTION:
+            return False
+        visible = list(state.order_queue.visible)
+        tickets = sum(1 for entry in visible if entry.name == self._target)
+        if tickets == 0:
+            return False
+        put_down = self._teammates_things(environment, chef)[3] if RESPECT_MATES else {}
+        makers = sum(
+            1
+            for a in environment.get_entities_of_type(Agent)
+            if a.id != chef.id and chef.team and a.team == chef.team
+            and self._target in _working_on(environment, state, a, visible, put_down.get(a.id, set()))
+        )
+        return makers >= tickets
 
     def _park(self, environment: Environment, chef: Agent) -> list[Mutation]:
         """With nothing to do, step off any tile others need to reach a
