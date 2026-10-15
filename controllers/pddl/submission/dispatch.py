@@ -115,6 +115,9 @@ class Options:
     # the new dish) as a separate job, for any chef, that sets the food on
     # a free counter beforehand; the dish chef takes it from there.
     prestage: bool = False
+    # Pre-stage at the start of the plan instead of just before the dish
+    # needs the food, out of the way of the stations' busy times.
+    prestage_early: bool = False
     # Chefs (symbols) to leave out, to keep a crowded kitchen clear.
     exclude: frozenset[str] = frozenset()
     # Only the chefs the plan names may get jobs (Part 4: one chef each).
@@ -320,11 +323,13 @@ class _Dispatcher:
             if (step.name == "take_food_onto_dish" and self.options.prestage
                     and step.parameters[3] != "p_empty"):
                 _, loc, food, plate, dish = step.parameters
-                spot = self._park_spot(_target(step), index - 0.6, index)
+                at = -1 + index / 1000 if self.options.prestage_early else index - 0.6
+                spot = self._park_spot(_target(step), at, index)
                 if spot is not None:
                     out.append(Job(chef=c, steps=[
-                        (index - 0.6, PDDLPlanStep("take_food", (c, loc, food))),
-                        (index - 0.5, PDDLPlanStep("put_down", (c, spot, food))),
+                        (at, PDDLPlanStep("take_food", (c, loc, food))),
+                        (at + (0.0001 if self.options.prestage_early else 0.1),
+                         PDDLPlanStep("put_down", (c, spot, food))),
                     ]))
                     job.steps.append(
                         (index, PDDLPlanStep("counter_food_onto_plate", (c, spot, food, plate, dish)))

@@ -105,10 +105,12 @@ class DefaultFromPDDL(FromPDDL):
                 best_steps = chosen
                 expired = outcome.expired
         for outcome, plan, chosen in staged_tips:
-            # A tip is worth one point; a later finish can cost the next
-            # order. Pre-staged food must come for free: no slower than the
-            # best plan without it.
-            if best is None or (outcome.key() > best[0] and outcome.key()[3] >= best[0][3] - 1):
+            # A tip is worth one point; a later finish can cost an order
+            # the plan leaves for later, or one a stuck plan must be
+            # replanned for. Then pre-staged food must come for free: no
+            # slower than the best plan without it.
+            if best is None or (outcome.key() > best[0] and (
+                    (not left_out and outcome.finished) or outcome.key()[3] >= best[0][3] - 1)):
                 best = (outcome.key(), plan)
                 best_steps = chosen
                 expired = outcome.expired
@@ -649,8 +651,9 @@ def candidate_options(kitchen: Kitchen, steps: list[PDDLPlanStep]):
                 yield Options(reorder=True, urgent=True, keep_tips=True,
                               split_cooks=split, split_plates=False)
             for split in (True, False):
-                yield Options(reorder=True, urgent=True, prestage=True,
-                              split_cooks=split, split_plates=False)
+                for early in (False, True):
+                    yield Options(reorder=True, urgent=True, prestage=True,
+                                  prestage_early=early, split_cooks=split, split_plates=False)
     yield Options(park_dishes=True)
     yield Options(move_stations="off", park_dishes=True)
     yield None
