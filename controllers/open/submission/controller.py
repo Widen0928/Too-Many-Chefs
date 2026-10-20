@@ -117,6 +117,12 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
+# With nothing worth cooking, make a dish before its ticket exists and leave
+# it plated on a counter on our side. Tickets come round again and plates
+# never run out, so when one for it appears we serve it at once, before any
+# chef who still has to cook it. At most MAX_STOCK such dishes at a time.
+STOCK = __import__("os").environ.get("L4_STOCK", "1") == "1"
+MAX_STOCK = int(__import__("os").environ.get("L4_MAX_STOCK", "2"))
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -283,6 +289,7 @@ class OpenController(Controller):
             not self._plan
             or (self._target is not None and self._target not in visible)
             or self._stuck > STUCK_TICKS
+            or (STOCK and self._stock_ticket(environment, visible))
         ):
             if LOG:
                 why = (
@@ -351,6 +358,22 @@ class OpenController(Controller):
             and self._target in _working_on(environment, state, a, visible, put_down.get(a.id, set()))
         )
         return makers >= tickets
+
+    def _stock_ticket(self, environment: Environment, visible: set) -> bool:
+        """Whether a ticket has appeared for a dish we have ready on a
+        counter while we work on something else (checked every few ticks)."""
+        if environment.timestep % 3:
+            return False
+        stocked = _stocked(environment)
+        ready = (set(stocked) & visible) - {self._target}
+        if not ready:
+            return False
+        if self._target is not None and self._target in ready:
+            return False
+        if getattr(self, "_stock_switched", None) == (environment.timestep // 30, frozenset(ready)):
+            return False
+        self._stock_switched = (environment.timestep // 30, frozenset(ready))
+        return True
 
     def _park(self, environment: Environment, chef: Agent) -> list[Mutation]:
         """With nothing to do, step off any tile others need to reach a
@@ -855,7 +878,77 @@ class OpenController(Controller):
                 done = finish(candidates[i], entry)
                 if done:
                     return done
+        if STOCK:
+            try:
+                steps = self._stock_steps(environment, chef_id, kitchen, mates)
+            except Exception:  # noqa: BLE001 - idling is fine too
+                steps = None
+            if steps:
+                import types
+
+                done = finish(steps, types.SimpleNamespace(name=None))
+                if done:
+                    return done
         return [], None, [], []
+
+    def _stock_steps(self, environment: Environment, chef_id: str, kitchen, mates):
+        """A plan that leaves a plated dish nobody has ordered yet on a free
+        counter on our side near the hatch, or None."""
+        from controllers.pddl.interfaces import PDDLProblem
+        from controllers.pddl.solvers import solve_problem_with_logging
+
+        from .planner.kitchen import loc_symbol, plate_symbol
+        from .planner.problem_generator import build_domain, build_problem
+
+        state = environment.get_first_entity_of_type(OvercookedState)
+        pool = list(getattr(state.order_queue.generator, "pool", None) or [])
+        if not pool:
+            return None
+        stocked = _stocked(environment)
+        if sum(stocked.values()) >= MAX_STOCK:
+            return None
+        now = environment.timestep
+        visible = {e.name for e in state.order_queue.visible}
+        options = []
+        for entry in pool:
+            steps = EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS)
+            if entry.name in stocked or entry.name in visible:
+                continue
+            if GAME_TICKS - now < steps * SLACK + 25:
+                continue  # no time to make it and still see its ticket
+            options.append((-(entry.reward / steps), entry))
+        if not options:
+            return None
+        me = next(a for a in environment.get_entities_of_type(Agent) if a.id == chef_id)
+        foreign = self._foreign or frozenset()
+        hatch = next(((d.x, d.y) for d in environment.get_entities_of_type(Delivery)), (me.x, me.y))
+        free = sorted(
+            (abs(hatch[0] - loc[0]) + abs(hatch[1] - loc[1]), loc)
+            for loc, counter in kitchen.counters.items()
+            if counter.empty(environment)
+            and any(n in (self._floor or ()) and n not in foreign for n in _goal_tiles(loc))
+        )
+        if not free:
+            return None
+        for _, entry in sorted(options, key=lambda o: o[0])[:2]:
+            text = _pruned(build_problem(kitchen, [entry], fast=True), environment, entry.name)
+            head = text[: text.index("(:goal")]
+            for _, loc in free[:1]:
+                goal = f"(on {plate_symbol(entry.name)} {loc_symbol(loc)})"
+                self._calls += 1
+                try:
+                    steps = solve_problem_with_logging(
+                        PDDLProblem(
+                            domain=build_domain(),
+                            problem=_hide(head + "(:goal (and " + goal + "))\n)\n", mates),
+                        ),
+                        time_limit_seconds=PLAN_SECONDS,
+                    )
+                except Exception:  # noqa: BLE001
+                    steps = []
+                if steps:
+                    return steps
+        return None
 
     def _choose_orders(self, environment: Environment, chef_id: str) -> list:
         """Orders worth chasing, best first.
@@ -901,11 +994,15 @@ class OpenController(Controller):
                 return float("inf")
             return entry.revealed_at + entry.time_limit - now
 
+        stocked = _stocked(environment) if STOCK else {}
+
         def eta(agent: Agent, entry) -> float:
             steps = EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS)
             held = _held_foods(environment, agent)
             if held & {entry.name}:
                 return 5.0
+            if agent.id == chef_id and entry.name in stocked:
+                return 8.0
             if held & _components(state, entry.name):
                 steps *= 0.6
             return steps
@@ -1162,6 +1259,22 @@ def _made_food_helps(environment, kitchen, entry, chef_id, ignore=frozenset()) -
             if holder is None or holder == chef_id:
                 return True
     return False
+
+
+def _stocked(environment) -> dict[str, int]:
+    """Finished dishes left plated on counters, by name."""
+    from simulator.entities import Counter
+
+    state = environment.get_first_entity_of_type(OvercookedState)
+    menu = {e.name for e in (getattr(state.order_queue.generator, "pool", None) or [])}
+    found: dict[str, int] = {}
+    for counter in environment.get_entities_of_type(Counter):
+        plate = environment.get_entity(counter.held_item_id) if counter.held_item_id else None
+        if isinstance(plate, Plate) and plate.held_item_id:
+            food = environment.get_entity(plate.held_item_id)
+            if isinstance(food, Food) and food.name in menu:
+                found[food.name] = found.get(food.name, 0) + 1
+    return found
 
 
 def _components(state: OvercookedState, dish: str) -> set[str]:
