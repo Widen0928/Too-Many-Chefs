@@ -183,6 +183,10 @@ class OpenController(Controller):
     # --- Controller interface -----------------------------------------------
 
     def get_actions(self, environment: Environment, context: Context) -> list[Mutation]:
+        # One budget for all waiting on the planner within this tick: waiting
+        # for the last plan and then for the next one could otherwise take
+        # twice WAIT_SECONDS and miss the host's 200 ms.
+        self._deadline = time.monotonic() + (WAIT_SECONDS or 0.0)
         try:
             actions = self._act(environment)
         except Exception:  # noqa: BLE001 - never lose a set to an error
@@ -211,6 +215,13 @@ class OpenController(Controller):
             return [TurnAgent(agent_id=chef.id, orientation=chef.orientation)]
         except Exception:  # noqa: BLE001
             return []
+
+    def _wait_left(self) -> float | None:
+        """Seconds still to wait for the planner this tick (None: wait for it,
+        as local evaluation does with L4_SYNC)."""
+        if WAIT_SECONDS is None:
+            return None
+        return max(0.0, getattr(self, "_deadline", 0.0) - time.monotonic())
 
     def is_busy(self) -> bool:
         return False
@@ -244,7 +255,7 @@ class OpenController(Controller):
             # The host waits for our answer (up to 200 ms) before the kitchen
             # moves on, so waiting here costs no game time; idling would.
             try:
-                self._future.result(timeout=WAIT_SECONDS)
+                self._future.result(timeout=self._wait_left())
             except Exception:  # noqa: BLE001 - timeouts included
                 pass
         if self._future is not None and self._future.done():
@@ -316,7 +327,7 @@ class OpenController(Controller):
                 self._teammates_things(environment, chef) if RESPECT_MATES else None,
             )
             try:
-                self._future.result(timeout=WAIT_SECONDS)
+                self._future.result(timeout=self._wait_left())
             except Exception:  # noqa: BLE001
                 pass
             if self._future.done() and not getattr(self, "_retrying", False):
