@@ -117,6 +117,9 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
+# With nothing to do, wait at the tile on our side nearest (in total) to our
+# storages, off every tile anyone needs, so a new ticket is started sooner.
+HOME = __import__("os").environ.get("L4_HOME", "1") == "1"
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -378,7 +381,7 @@ class OpenController(Controller):
             )
         position = (chef.x, chef.y)
         if position not in self._busy_tiles:
-            return []
+            return self._go_home(environment, chef) if HOME else []
         others = {
             (a.x, a.y)
             for a in environment.get_entities_of_type(Agent)
@@ -397,6 +400,53 @@ class OpenController(Controller):
                 return [_move(chef, position, tile)]
             for n in _goal_tiles(tile):
                 if n in floor and n not in others and n not in previous:
+                    previous[n] = tile
+                    queue.append(n)
+        return []
+
+    def _go_home(self, environment: Environment, chef: Agent) -> list[Mutation]:
+        """One step towards our waiting tile, if we are not on it."""
+        from simulator.entities import Storage
+
+        floor = self._floor or set()
+        foreign = self._foreign or frozenset()
+        if getattr(self, "_home", None) is None:
+            def distances(starts):
+                dist = {t: 0 for t in starts}
+                queue = deque(starts)
+                while queue:
+                    tile = queue.popleft()
+                    for n in _goal_tiles(tile):
+                        if n in floor and n not in dist:
+                            dist[n] = dist[tile] + 1
+                            queue.append(n)
+                return dist
+
+            maps = []
+            for storage in environment.get_entities_of_type(Storage):
+                starts = [n for n in _goal_tiles((storage.x, storage.y)) if n in floor and n not in foreign]
+                if starts:
+                    maps.append(distances(starts))
+            spots = [t for t in floor if t not in foreign and t not in self._busy_tiles]
+            if not maps or not spots:
+                self._home = ()
+            else:
+                self._home = min(spots, key=lambda t: (sum(m.get(t, 99) for m in maps), t))
+        home = self._home
+        position = (chef.x, chef.y)
+        if not home or position == home:
+            return []
+        others = {(a.x, a.y) for a in environment.get_entities_of_type(Agent) if a.id != chef.id and a.x is not None}
+        previous = {position: None}
+        queue = deque([position])
+        while queue:
+            tile = queue.popleft()
+            if tile == home:
+                while previous[tile] != position:
+                    tile = previous[tile]
+                return [_move(chef, position, tile)]
+            for n in _goal_tiles(tile):
+                if n in floor and n not in others and n not in previous and n not in foreign:
                     previous[n] = tile
                     queue.append(n)
         return []
