@@ -117,6 +117,12 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
+# Wait beside food that is cooking by itself for as long as it takes, not a
+# count of ticks fixed when the wait began.
+PATIENT = __import__("os").environ.get("L4_PATIENT", "1") == "1"
+# Skip the rough time check for an order part of which is already made: the
+# plan's own timing decides.
+PROGRESS = __import__("os").environ.get("L4_PROGRESS", "1") == "1"
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -431,7 +437,10 @@ class OpenController(Controller):
             held_now[a.id] = things
         for cls in (Equipment, Counter):
             for container in environment.get_entities_of_type(cls):
-                if isinstance(container, Plate):
+                if isinstance(container, Plate) or container.x is None or container.y is None:
+                    # A pot or bowl a chef is carrying has no tile; other
+                    # controllers do carry them, food and all. Leave it be
+                    # (it gets an owner again where it is put down).
                     continue
                 item = container.held_item_id
                 entity = environment.get_entity(item) if item else None
@@ -565,6 +574,8 @@ class OpenController(Controller):
             # (another chef's food in the station we meant to use, say)
             # will not sort itself out, so plan again.
             self._held_back += 1
+            if PATIENT and _cooking(environment, target):
+                self._held_back = 0  # done in a few ticks, whoever's it is
             if self._held_back > _patience(environment, target):
                 if LOG:
                     from simulator.entities import Equipment
@@ -929,11 +940,21 @@ class OpenController(Controller):
                 return True
             return False
 
+        made = (
+            {f.name for f in environment.get_entities_of_type(Food) if not state.is_raw_food(f.name)}
+            if PROGRESS else set()
+        )
+
+        def rough_time(entry) -> float:
+            if made & _components(state, entry.name):
+                return 8.0  # partly made already
+            return EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
+
         open_orders = [
             (i, entry)
             for i, entry in enumerate(visible)
             if not leave(entry)
-            and time_left(entry) >= EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
+            and time_left(entry) >= rough_time(entry)
             and now - self._failed.get(entry.name, -999) >= 20
         ]
         hatch = next(
@@ -1072,6 +1093,20 @@ def _next_move(environment: Environment, chef: Agent, target) -> MoveAgent | Non
                 previous[nxt] = tile
                 queue.append(nxt)
     return None
+
+
+def _cooking(environment: Environment, target) -> bool:
+    """Whether food is cooking by itself at ``target`` and not done yet."""
+    from simulator.entities import Equipment
+    from simulator.mutations.cooking import cooking_progress
+
+    for item in environment.get_entities_of_type(Equipment):
+        if (item.x, item.y) != tuple(target) or isinstance(item, Plate) or not item.cooks_by_itself:
+            continue
+        progress = cooking_progress(environment, item)
+        if progress is not None and progress < 1:
+            return True
+    return False
 
 
 def _patience(environment: Environment, target) -> int:
