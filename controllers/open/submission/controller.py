@@ -185,6 +185,10 @@ class OpenController(Controller):
         self._contents: dict[str, str] = {}
         self._prev_held: dict[str, set] = {}
         self._owned_since: dict[str, int] = {}
+        # Waste-category subcounters (only used when LOG is on).
+        self._last_none_tick: int = -999
+        self._last_yield_tick: int = -999
+        self._block_is_food: bool = False
 
     # --- Controller interface -----------------------------------------------
 
@@ -213,6 +217,17 @@ class OpenController(Controller):
             else:
                 kind = "blocked"
             self._ticks_by_kind[kind] = self._ticks_by_kind.get(kind, 0) + 1
+            # Subcategories for waste analysis (l4_waste.py).
+            now_t = environment.timestep
+            if kind in ("blocked", "wait") and self._block_is_food:
+                self._ticks_by_kind["food"] = self._ticks_by_kind.get("food", 0) + 1
+            elif kind == "idle":
+                if now_t - self._last_none_tick < 5:
+                    self._ticks_by_kind["impossible"] = self._ticks_by_kind.get("impossible", 0) + 1
+                elif now_t - self._last_yield_tick < 12:
+                    self._ticks_by_kind["yield_idle"] = self._ticks_by_kind.get("yield_idle", 0) + 1
+            elif kind == "planning" and now_t - self._last_yield_tick < 20:
+                self._ticks_by_kind["yield_plan"] = self._ticks_by_kind.get("yield_plan", 0) + 1
         if actions:
             return actions
         # Idle: answer with a turn on the spot, so every tick gets an action.
@@ -289,6 +304,8 @@ class OpenController(Controller):
             if not plan:
                 # Nothing worth doing right now: look again shortly.
                 self._idle_until = environment.timestep + 3
+                if LOG:
+                    self._last_none_tick = environment.timestep
             if not plan and target:
                 self._failed[target] = environment.timestep
 
@@ -296,6 +313,8 @@ class OpenController(Controller):
         if YIELD and self._future is None and self._plan and self._mate_makes_target(environment, chef, state):
             self._why = "mate"
             self._stuck = STUCK_TICKS + 1
+            if LOG:
+                self._last_yield_tick = environment.timestep
         if self._future is None and environment.timestep >= self._idle_until and (
             not self._plan
             or (self._target is not None and self._target not in visible)
@@ -545,6 +564,8 @@ class OpenController(Controller):
         }
 
     def _follow(self, environment: Environment, chef: Agent) -> list[Mutation]:
+        if LOG:
+            self._block_is_food = False
         step = self._plan[0]
         mutation = step.mutation
         target = step.location
@@ -576,6 +597,8 @@ class OpenController(Controller):
             self._held_back += 1
             if PATIENT and _cooking(environment, target):
                 self._held_back = 0  # done in a few ticks, whoever's it is
+                if LOG:
+                    self._block_is_food = True
             if self._held_back > _patience(environment, target):
                 if LOG:
                     from simulator.entities import Equipment
@@ -862,6 +885,15 @@ class OpenController(Controller):
             left = GAME_TICKS - now
             if entry.time_limit is not None:
                 left = min(left, entry.revealed_at + entry.time_limit - now)
+            if LOG:
+                if left >= quickest * SLACK + 3:
+                    chk = "ok"
+                elif quickest + 2 <= left or not STRICT:
+                    chk = "reserve"
+                else:
+                    chk = "too_late"
+                print("LOG", now, chef_id, "plan_check", dish,
+                      f"planned={quickest:.0f}", f"deadline={left:.0f}", chk, flush=True)
             if left < quickest * SLACK + 3:
                 # Would not make it in time (the order expires, or the game
                 # ends): try the next order, keeping this one in reserve.
@@ -877,6 +909,13 @@ class OpenController(Controller):
                 done = finish(candidates[i], entry)
                 if done:
                     return done
+        if LOG:
+            state = environment.get_first_entity_of_type(OvercookedState)
+            now = environment.timestep
+            print("LOG", now, chef_id, "none", [_short(e.name) for e in choices], "reserve",
+                  [(_short(e.name), round(q)) for q, e, *_ in reserve], "visible",
+                  [(_short(e.name), e.revealed_at + (e.time_limit or 0) - now) for e in state.order_queue.visible],
+                  flush=True)
         return [], None, [], []
 
     def _choose_orders(self, environment: Environment, chef_id: str) -> list:
@@ -957,6 +996,22 @@ class OpenController(Controller):
             and time_left(entry) >= rough_time(entry)
             and now - self._failed.get(entry.name, -999) >= 20
         ]
+        if LOG:
+            open_idx = {i for i, _ in open_orders}
+            for i, entry in enumerate(visible):
+                tl = time_left(entry)
+                rt = rough_time(entry)
+                e = eta(me_agent, entry)
+                if i in open_idx:
+                    reason = "ok"
+                elif now - self._failed.get(entry.name, -999) < 20:
+                    reason = "cooldown"
+                elif entry.name in left_to_mates:
+                    reason = "mate"
+                else:
+                    reason = "too_late"
+                print("LOG", now, chef_id, "pick", _short(entry.name),
+                      f"eta={e:.0f}", f"deadline={tl:.0f}", reason, flush=True)
         hatch = next(
             ((d.x, d.y) for d in environment.get_entities_of_type(Delivery)), (0, 0)
         )
