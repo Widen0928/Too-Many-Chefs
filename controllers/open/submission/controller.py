@@ -123,6 +123,12 @@ PATIENT = __import__("os").environ.get("L4_PATIENT", "1") == "1"
 # Skip the rough time check for an order part of which is already made: the
 # plan's own timing decides.
 PROGRESS = __import__("os").environ.get("L4_PROGRESS", "1") == "1"
+# Multiplier applied to EXPECTED_STEPS for the rough-time pre-filter in
+# _choose_orders.  Orders with time_left < EXPECTED_STEPS * ROUGH_FRAC are
+# skipped before the planner is called.  Default 0.8 matches the original
+# hard-coded value; lower values admit more near-deadline orders (tested:
+# held-ingredient variants hurt mixed mode, reverted).
+ROUGH_FRAC = float(__import__("os").environ.get("L4_ROUGH_FRAC", "0.8"))
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -986,8 +992,8 @@ class OpenController(Controller):
 
         def rough_time(entry) -> float:
             if made & _components(state, entry.name):
-                return 8.0  # partly made already
-            return EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
+                return 8.0  # partly made already: let the planner time it
+            return EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * ROUGH_FRAC
 
         open_orders = [
             (i, entry)
