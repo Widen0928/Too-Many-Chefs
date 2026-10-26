@@ -171,7 +171,8 @@ def test_batch_suffix_sets_horizon_and_only_applies_to_its_selected_policy(monke
 def test_timed_burning_batch_candidate_preserves_original_first_two_and_is_not_duplicated():
     options = [3, "3r", 2, None, "3w"]
     selected = strategy.strategy_options(burning_kitchen(), options)
-    assert selected == [3, "3r", "4rg", "2rg", "3rb", "3safer", "1r", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep", "swapbuns", "1buns", "2buns", "4rq2", "4rq5", None]
+    # The strategies that most often win go first (strategy.TRIED_FIRST).
+    assert selected == ["4rg", "2rg", "3rb", None, "1r", 3, "3r", "3safer", "swap", "4rq1", "4rq4", 2, "3w", "3safe", "3rbprep", "swapbuns", "1buns", "2buns", "4rq2", "4rq5"]
     assert options == [3, "3r", 2, None, "3w"]
     assert strategy.strategy_options(burning_kitchen(), selected).count("3rb") == 1
     assert strategy.strategy_options(burning_kitchen(), selected).count("swap") == 1

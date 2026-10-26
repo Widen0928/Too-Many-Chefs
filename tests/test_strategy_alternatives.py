@@ -21,7 +21,7 @@ def test_swap_policies_follow_all_original_candidates(monkeypatch):
     monkeypatch.setattr(config, 'CONFIG', replace(config.CONFIG, select_deadline_alternatives=True))
     options = [3, '3r', 2, None, 1, '2r', '3safe', 4, '1r', 'r', '4r']
     assert strategy.strategy_options(environment(), options) == [
-        *options, '3swap', '3rswap', '2rswap',
+        None, '1r', 3, '3r', 2, 1, '2r', '3safe', 4, 'r', '4r', '3swap', '3rswap', '2rswap',
     ]
     assert options[-1] == '4r'  # do not mutate the caller's list
 
@@ -45,9 +45,10 @@ def test_six_identical_orders_try_tip_safe_before_other_horizons():
     queue = OrderQueue.from_orders([OrderEntry(name='cake', time_limit=100)] * 6)
     env = Environment().with_entity(OvercookedState(order_queue=queue))
     options = [3, '3r', 2, '3safe', None]
-    # Staged plans (no burning station here): 4rg early, the rest last.
+    # Six identical tickets: the whole queue at once first, then horizon 3;
+    # staged plans (no burning station here): 4rg early, the rest last.
     assert strategy.strategy_options(env, options) == [
-        3, '4rg', '3safe', '3tipfarm', '3r', 2, None, '3rg', '6rg'
+        None, 3, '4rg', '3safe', '3tipfarm', '3r', 2, '3rg', '6rg'
     ]
     assert options == [3, '3r', 2, '3safe', None]
 
