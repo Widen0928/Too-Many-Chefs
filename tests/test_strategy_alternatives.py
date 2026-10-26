@@ -47,7 +47,7 @@ def test_six_identical_orders_try_tip_safe_before_other_horizons():
     options = [3, '3r', 2, '3safe', None]
     # Six identical tickets: strategy.TRIED_FIRST_SAME_DISH first.
     assert strategy.strategy_options(env, options) == [
-        '6rg', None, 3, '3tipfarm', '4rg', '3rg', '3safe', '3r', 2
+        '6rg', '4rgo', None, 3, '3tipfarm', 'o', '6rgo', '4rg', '3rg', '3safe', '3r', 2
     ]
     assert options == [3, '3r', 2, '3safe', None]
 

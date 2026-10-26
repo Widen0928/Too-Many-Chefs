@@ -49,5 +49,7 @@ def test_staged_plan_solves_each_order_from_the_previous_state():
 def test_staged_suffix_is_parsed_first():
     assert strategy_flags("4rg") == {
         "reorder": True, "prefetch": False, "pair": False, "next_prep": False, "staged": True,
+        "old_tips": False,
     }
     assert strategy_flags("3r")["staged"] is False
+    assert strategy_flags("4rgo") == {**strategy_flags("4rg"), "old_tips": True}

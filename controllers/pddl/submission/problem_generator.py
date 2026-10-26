@@ -82,6 +82,9 @@ class DefaultProblemGenerator(ProblemGenerator):
         domain = build_domain()
         last: PDDLProblem | None = None
         strategy = self._strategy_horizon(environment)
+        old_tips = isinstance(strategy, str) and strategy.endswith("o")
+        if old_tips:
+            strategy = strategy[:-1] or None
         farm_tips = isinstance(strategy, str) and strategy.endswith("tipfarm")
         if farm_tips:
             strategy = strategy[:-len("tipfarm")]
@@ -129,6 +132,8 @@ class DefaultProblemGenerator(ProblemGenerator):
         _from_pddl.NEXT_PREP[1] = True
         _from_pddl.STAGED[0] = staged
         _from_pddl.STAGED[1] = True
+        _from_pddl.OLD_TIPS[0] = old_tips
+        _from_pddl.OLD_TIPS[1] = True
         if isinstance(strategy, str):
             if strategy.endswith("safer"):
                 model_choice = "safe"

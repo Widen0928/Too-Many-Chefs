@@ -67,6 +67,7 @@ class DefaultFromPDDL(FromPDDL):
         PAIR[0] = _pair_for(self._environment)
         NEXT_PREP[0] = _next_prep_for(self._environment)
         STAGED[0] = _staged_for(self._environment)
+        OLD_TIPS[0] = _old_tips_for(self._environment)
         cache_key = None if quick else _cache_key(self._environment, steps)
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -96,11 +97,11 @@ class DefaultFromPDDL(FromPDDL):
                 continue
             seen.append(chosen)
             plan = self.translate_all(kitchen, chosen, left_out)
-            outcome = simulate(self._environment, plan)
+            outcome = simulate(self._environment, plan, old_tips=OLD_TIPS[0])
             if options is not None and options.prestage:
                 staged_tips.append((outcome, plan, chosen))
                 continue
-            if best is None or outcome.key() > best[0]:
+            if best is None or _better(outcome.key(), best[0]):
                 best = (outcome.key(), plan)
                 best_steps = chosen
                 expired = outcome.expired
@@ -117,7 +118,7 @@ class DefaultFromPDDL(FromPDDL):
         if not quick and PREFETCH[0]:
             for chosen in prefetch_bun_candidates(kitchen, steps):
                 plan = self.translate_all(kitchen, chosen, left_out)
-                outcome = simulate(self._environment, plan)
+                outcome = simulate(self._environment, plan, old_tips=OLD_TIPS[0])
                 if best is None or outcome.key() > best[0]:
                     best = (outcome.key(), plan)
                     best_steps = chosen
@@ -126,7 +127,7 @@ class DefaultFromPDDL(FromPDDL):
             pair_best = None
             for chosen in prefetch_first_two_burgers(kitchen, steps):
                 plan = self.translate_all(kitchen, chosen, left_out)
-                outcome = simulate(self._environment, plan)
+                outcome = simulate(self._environment, plan, old_tips=OLD_TIPS[0])
                 if pair_best is None or outcome.key() > pair_best[0]:
                     pair_best = (outcome.key(), plan)
                     best_steps = chosen
@@ -138,7 +139,7 @@ class DefaultFromPDDL(FromPDDL):
             if staged is not None:
                 best_steps = staged
                 plan = self.translate_all(kitchen, staged, left_out)
-                outcome = simulate(self._environment, plan)
+                outcome = simulate(self._environment, plan, old_tips=OLD_TIPS[0])
                 best = (outcome.key(), plan)
                 expired = outcome.expired
         if best is None:
@@ -430,7 +431,7 @@ def _cache_key(environment: Environment, steps: list[PDDLPlanStep]) -> str | Non
         text = (
             _cache_namespace() + canonical(environment) + repr(steps)
             + repr(CONFIG) + repr(REORDER[0]) + repr(PREFETCH[0])
-            + repr(PAIR[0]) + repr(NEXT_PREP[0]) + repr(STAGED[0])
+            + repr(PAIR[0]) + repr(NEXT_PREP[0]) + repr(STAGED[0]) + repr(OLD_TIPS[0])
         )
         return hashlib.sha256(text.encode()).hexdigest()
     except Exception:  # noqa: BLE001
@@ -532,6 +533,19 @@ PREFETCH = [False, False]
 PAIR = [False, False]
 NEXT_PREP = [False, False]
 STAGED = [False, False]
+# Rollouts score tips as before the 2026-10-26 template (rollout.simulate).
+OLD_TIPS = [False, False]
+
+
+def _old_tips_for(environment) -> bool:
+    if OLD_TIPS[1]:
+        return OLD_TIPS[0]
+    try:
+        from .strategy import fingerprint, remembered, strategy_flags
+
+        return strategy_flags(remembered(fingerprint(environment)))["old_tips"]
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _staged_for(environment) -> bool:
@@ -1008,3 +1022,29 @@ class _Translator:
 
     _deliver_return_clean = _deliver
     _deliver_return_dirty = _deliver
+
+
+def _better(key: tuple, best: tuple) -> bool:
+    """Whether rollout ``key`` beats ``best`` (Outcome.key tuples).
+
+    Since the 2026-10-26 template, taking food from storage onto a held
+    plate pays tips too, so schedules that differ only in tips are common.
+    A few tips must not buy a slower schedule: the orders after the
+    rollout's horizon pay for it (3-2 lost a whole cake). With
+    ``config.tip_tick_slack`` set, a gap under ORDER_POINTS is a tip gap,
+    and a schedule more than that many ticks slower cannot win on it.
+    """
+    from .config import CONFIG
+
+    slack = getattr(CONFIG, "tip_tick_slack", None)
+    if slack is None or key[0] != best[0] or abs(key[1] - best[1]) >= ORDER_POINTS:
+        return key > best
+    if key[2] != best[2]:
+        return key[2]
+    if abs(key[3] - best[3]) > slack:
+        return key[3] > best[3]
+    return key > best
+
+
+# Points apart that mean an order, not tips.
+ORDER_POINTS = 20

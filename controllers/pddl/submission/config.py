@@ -34,6 +34,10 @@ class Config:
     # Seconds strategy selection may spend playing the level out. The
     # server stops a level after 60 s (Level 2) or 90 s (Level 3), and the
     # run itself needs time too, so this stays well inside.
+    # Rollout candidates within ORDER_POINTS of each other differ in tips
+    # only; one more than this many ticks slower cannot win on them
+    # (from_pddl._better). None: compare points first, as before.
+    tip_tick_slack: int | None = None
     selection_seconds: float = 36.0
     # Never start a play-out likely to end after this many seconds. 42 s /
     # 52 s let 3-5 take 73 s on a busy server (limit 90 s); the strategies

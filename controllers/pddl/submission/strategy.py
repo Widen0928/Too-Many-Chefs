@@ -209,11 +209,14 @@ def choose_horizon(environment: Environment, options: list) -> object:
         except Exception:  # noqa: BLE001 - a failed play-out just loses
             continue
         finally:
-            longest = max(longest, time.monotonic() - began)
-        print(f"[tmc] strategy {horizon!r} score {score} in {time.monotonic() - began:.1f}s",
+            took = time.monotonic() - began
+            longest = max(longest, took)
+        print(f"[tmc] strategy {horizon!r} score {score} in {took:.1f}s",
               file=sys.stderr, flush=True)
-        if best is None or score > best[0]:
-            best = (score, horizon)
+        # On a tie the quicker play-out wins: the real run takes as long, and
+        # a slow grader stops a level at 90 s (3-5 took 72 s with 4rg).
+        if best is None or score > best[0] or (score == best[0] and took < 0.7 * best[2] - 1.0):
+            best = (score, horizon, took)
         if score_bound is not None and best[0][0] >= score_bound:
             print(f"[tmc] reached remaining-score bound {score_bound}",
                   file=sys.stderr, flush=True)
@@ -354,14 +357,25 @@ def strategy_options(environment: Environment, options: list) -> list:
 # template): these, in this order, most often reach the best score within
 # the first two or three tries (best on the first try 240 -> 279 levels).
 TRIED_FIRST = ("4rg", "2rg", "3rg", "3rb", None, "1r")
-# Six or more identical tickets (the busy cake kitchen, like 3-2): on 80
-# shuffled variants these reach the best play-out within one try in 60,
-# within three in 74 (the general order: 47 and 58).
-TRIED_FIRST_SAME_DISH = ("6rg", None, 3, "4r", "3tipfarm", "4rg", "3rg")
+# Six or more identical tickets (the busy cake kitchen, like 3-2): on 90
+# shuffled variants these reach the best play-out within one try in 67,
+# within three in 81. 4rgo goes second: on the server 6rg, None and 3 each
+# lost a cake on 3-2, the loss 4rgo wins back (OLD_TIP_STRATEGIES).
+TRIED_FIRST_SAME_DISH = ("6rg", "4rgo", None, 3, "4r", "3tipfarm", "o", "6rgo", "4rg", "3rg")
+
+
+# Busy cake kitchen: the same strategies with rollouts scored as before
+# the 2026-10-26 template (suffix "o", rollout.simulate). The new tip for
+# taking food onto a held plate tipped close calls towards plans that lost
+# a whole cake on 5 of 80 variants; these win it back.
+OLD_TIP_STRATEGIES = ("4rgo", "6rgo", "o")
 
 
 def _tried_first(options: list) -> list:
-    front = TRIED_FIRST_SAME_DISH if "3tipfarm" in options else TRIED_FIRST
+    same_dish = "3tipfarm" in options
+    if same_dish:
+        options = options + [o for o in OLD_TIP_STRATEGIES if o not in options]
+    front = TRIED_FIRST_SAME_DISH if same_dish else TRIED_FIRST
     first = [o for o in front if o in options]
     return first + [o for o in options if o not in first]
 
@@ -387,9 +401,12 @@ def strategy_flags(strategy) -> dict:
     worker process applies exactly what the strategy was played out with.
     """
     flags = {"reorder": False, "prefetch": False, "pair": False, "next_prep": False,
-             "staged": False}
+             "staged": False, "old_tips": False}
     if not isinstance(strategy, str):
         return flags
+    if strategy.endswith("o"):
+        flags["old_tips"] = True
+        strategy = strategy[:-1]
     if strategy.endswith("tipfarm"):
         strategy = strategy[: -len("tipfarm")]
     if strategy.endswith("g"):
