@@ -45,10 +45,9 @@ def test_six_identical_orders_try_tip_safe_before_other_horizons():
     queue = OrderQueue.from_orders([OrderEntry(name='cake', time_limit=100)] * 6)
     env = Environment().with_entity(OvercookedState(order_queue=queue))
     options = [3, '3r', 2, '3safe', None]
-    # Six identical tickets: the whole queue at once first, then horizon 3;
-    # staged plans (no burning station here): 4rg early, the rest last.
+    # Six identical tickets: strategy.TRIED_FIRST_SAME_DISH first.
     assert strategy.strategy_options(env, options) == [
-        None, 3, '4rg', '3safe', '3tipfarm', '3r', 2, '3rg', '6rg'
+        '6rg', None, 3, '3tipfarm', '4rg', '3rg', '3safe', '3r', 2
     ]
     assert options == [3, '3r', 2, '3safe', None]
 

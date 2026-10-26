@@ -354,9 +354,10 @@ def strategy_options(environment: Environment, options: list) -> list:
 # template): these, in this order, most often reach the best score within
 # the first two or three tries (best on the first try 240 -> 279 levels).
 TRIED_FIRST = ("4rg", "2rg", "3rg", "3rb", None, "1r")
-# Six or more identical tickets (the busy cake kitchen): planning the whole
-# queue at once was best on the first try in 9 of 10 variants, then 3.
-TRIED_FIRST_SAME_DISH = (None, 3)
+# Six or more identical tickets (the busy cake kitchen, like 3-2): on 80
+# shuffled variants these reach the best play-out within one try in 60,
+# within three in 74 (the general order: 47 and 58).
+TRIED_FIRST_SAME_DISH = ("6rg", None, 3, "4r", "3tipfarm", "4rg", "3rg")
 
 
 def _tried_first(options: list) -> list:
