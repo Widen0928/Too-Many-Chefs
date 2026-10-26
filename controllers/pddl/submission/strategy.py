@@ -86,6 +86,16 @@ def _selection_seconds() -> float:
     return CONFIG.selection_seconds
 
 
+def _hard_cap_seconds() -> float:
+    return _setting("hard_cap_seconds", HARD_CAP_SECONDS)
+
+
+def _setting(name: str, default: float) -> float:
+    from .config import CONFIG
+
+    return getattr(CONFIG, name, default)
+
+
 def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
     """Play the level from ``environment`` to the end under ``horizon``.
 
@@ -187,8 +197,10 @@ def choose_horizon(environment: Environment, options: list) -> object:
         # play-out that would likely end past the hard cap.
         # Quick play-outs (a short level) may use more of the time limit,
         # since the run after selection is short too.
-        budget = FAST_LEVEL_SECONDS if longest < FAST_PLAYOUT_SECONDS else _selection_seconds()
-        cap = FAST_LEVEL_SECONDS if longest < FAST_PLAYOUT_SECONDS else HARD_CAP_SECONDS
+        fast = longest < _setting("fast_playout_seconds", FAST_PLAYOUT_SECONDS)
+        fast_level = _setting("fast_level_seconds", FAST_LEVEL_SECONDS)
+        budget = fast_level if fast else _selection_seconds()
+        cap = fast_level if fast else _hard_cap_seconds()
         if best is not None and (spent > budget or spent + longest > cap):
             break
         began = time.monotonic()

@@ -34,7 +34,14 @@ class Config:
     # Seconds strategy selection may spend playing the level out. The
     # server stops a level after 60 s (Level 2) or 90 s (Level 3), and the
     # run itself needs time too, so this stays well inside.
-    selection_seconds: float = 30.0
+    selection_seconds: float = 42.0
+    # Never start a play-out likely to end after this many seconds. The
+    # 2026-10-26 template plays out about 16% slower, so the old 30 s / 40 s
+    # stopped before the strategies that serve every order on 3-2 and 3-8.
+    hard_cap_seconds: float = 52.0
+    # Play-outs all quicker than this: selection may go on to fast_level_seconds.
+    fast_playout_seconds: float = 4.0
+    fast_level_seconds: float = 40.0
     # Once a full trial reaches a conservative ceiling on remaining points,
     # further strategies cannot improve the grade.
     stop_at_score_bound: bool = True
