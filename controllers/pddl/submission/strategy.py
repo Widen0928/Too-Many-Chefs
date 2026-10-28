@@ -210,6 +210,7 @@ def choose_horizon(environment: Environment, options: list) -> object:
     longest = 0.0
     best_served_all = False
     no_gain = 0
+    cake_rush = _same_dish_queue(environment) and _every_order_in_stock(environment)
     for horizon in options:
         if best_served_all and no_gain >= _setting("no_gain_stop", NO_GAIN_STOP):
             print(f"[tmc] every order served, no gain in {no_gain} strategies",
@@ -225,6 +226,9 @@ def choose_horizon(environment: Environment, options: list) -> object:
         fast_level = _setting("fast_level_seconds", FAST_LEVEL_SECONDS)
         budget = fast_level if fast else _selection_seconds()
         cap = fast_level if fast else _hard_cap_seconds()
+        if cake_rush and not fast:
+            budget = _setting("cake_selection_seconds", budget)
+            cap = _setting("cake_hard_cap_seconds", cap)
         if best is not None and (spent > budget or spent + longest > cap):
             break
         began = time.monotonic()
@@ -411,6 +415,21 @@ def _same_dish_queue(environment: Environment) -> bool:
         return False
     entries = [*state.order_queue.visible, *state.order_queue.pending]
     return len(entries) >= 5 and len({entry.name for entry in entries}) == 1
+
+
+def _every_order_in_stock(environment: Environment) -> bool:
+    """No visible ticket is left out for lack of food
+    (problem_generator.feasible_orders)."""
+    try:
+        from simulator.entities import OvercookedState
+
+        from .kitchen import Kitchen
+        from .problem_generator import feasible_orders
+
+        entries = list(environment.get_first_entity_of_type(OvercookedState).order_queue.visible)
+        return bool(entries) and len(feasible_orders(Kitchen(environment), entries)) == len(entries)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _tried_first(options: list, environment: Environment | None = None) -> list:

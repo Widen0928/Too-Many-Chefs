@@ -49,6 +49,11 @@ class Config:
     # Play-outs all quicker than this: selection may go on to fast_level_seconds.
     fast_playout_seconds: float = 4.0
     fast_level_seconds: float = 40.0
+    # Six or more of one dish with every ticket in stock (3-2): one
+    # play-out takes ~28 s on the server, so the usual cap allows only the
+    # first. These let a second one run (3-2 ended after 30 s of 90).
+    cake_selection_seconds: float = 56.0
+    cake_hard_cap_seconds: float = 68.0
     # Once a full trial reaches a conservative ceiling on remaining points,
     # further strategies cannot improve the grade.
     stop_at_score_bound: bool = True
