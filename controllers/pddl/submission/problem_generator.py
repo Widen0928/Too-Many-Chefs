@@ -240,7 +240,10 @@ class DefaultProblemGenerator(ProblemGenerator):
 
         try:
             return choose_horizon(environment, options)
-        except Exception:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001
+            from .strategy import _say
+
+            _say(f"[tmc] strategy selection failed: {type(error).__name__}: {error}")
             return CONFIG.horizon
 
     def should_replan(self, environment: Environment) -> bool:

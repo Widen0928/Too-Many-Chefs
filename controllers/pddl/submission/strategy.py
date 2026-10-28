@@ -177,17 +177,33 @@ def play_out(environment: Environment, horizon, max_ticks: int = 700) -> tuple:
         )
     except AttributeError:  # unknown: keep selecting
         LAST_SERVED_ALL[0] = False
+    try:
+        LAST_LOST_ORDER[0] = end.order_queue.expired_count > first.order_queue.expired_count
+    except AttributeError:
+        LAST_LOST_ORDER[0] = False
     return (end.score - start, -(env.timestep - environment.timestep))
 
 
 # Whether the last play_out served every order (none expired, none left).
 LAST_SERVED_ALL = [False]
+# Whether the last play_out let an order expire.
+LAST_LOST_ORDER = [False]
 # Selection stops once the best play-out served every order and this many
 # strategies after it earned no more points: only tips or speed are left
 # to win, and the hidden levels' real run then starts sooner (3-5 took
 # 72 s of 90 trying 16 strategies that all scored the same). On 410
 # recorded levels this loses no points and plays out 60% fewer strategies.
 NO_GAIN_STOP = 6
+
+
+def _say(message: str) -> None:
+    """A selection diagnostic on stderr (stdout carries the run's result)."""
+    import sys
+
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def choose_horizon(environment: Environment, options: list) -> object:
@@ -204,17 +220,17 @@ def choose_horizon(environment: Environment, options: list) -> object:
 
     score_bound = remaining_score_upper_bound(environment) if CONFIG.stop_at_score_bound else None
     options = strategy_options(environment, options)
-    print(f"[tmc] strategy options {options}", file=sys.stderr, flush=True)
+    _say(f"[tmc] strategy options {options}")
     best = None
     started = time.monotonic()
     longest = 0.0
     best_served_all = False
     no_gain = 0
     cake_rush = _same_dish_queue(environment) and _every_order_in_stock(environment)
+    best_lost_order = False
     for horizon in options:
         if best_served_all and no_gain >= _setting("no_gain_stop", NO_GAIN_STOP):
-            print(f"[tmc] every order served, no gain in {no_gain} strategies",
-                  file=sys.stderr, flush=True)
+            _say(f"[tmc] every order served, no gain in {no_gain} strategies")
             break
         spent = time.monotonic() - started
         # The server stops a Level 3 run after 90 s (Level 2: 60 s), and the
@@ -226,7 +242,10 @@ def choose_horizon(environment: Environment, options: list) -> object:
         fast_level = _setting("fast_level_seconds", FAST_LEVEL_SECONDS)
         budget = fast_level if fast else _selection_seconds()
         cap = fast_level if fast else _hard_cap_seconds()
-        if cake_rush and not fast:
+        # The best play-out so far lets an order expire (3-2 on the server,
+        # where one play-out takes ~28 s): a second strategy may save it,
+        # and such a level's real run is short (3-2 ended after 30 s of 90).
+        if (cake_rush or best_lost_order) and not fast:
             budget = _setting("cake_selection_seconds", budget)
             cap = _setting("cake_hard_cap_seconds", cap)
         if best is not None and (spent > budget or spent + longest > cap):
@@ -234,13 +253,13 @@ def choose_horizon(environment: Environment, options: list) -> object:
         began = time.monotonic()
         try:
             score = play_out(environment, horizon)
-        except Exception:  # noqa: BLE001 - a failed play-out just loses
+        except Exception as error:  # noqa: BLE001 - a failed play-out just loses
+            _say(f"[tmc] strategy {horizon!r} failed: {type(error).__name__}: {error}")
             continue
         finally:
             took = time.monotonic() - began
             longest = max(longest, took)
-        print(f"[tmc] strategy {horizon!r} score {score} in {took:.1f}s",
-              file=sys.stderr, flush=True)
+        _say(f"[tmc] strategy {horizon!r} score {score} in {took:.1f}s")
         # On a tie the quicker play-out wins: the real run takes as long, and
         # a slow grader stops a level at 90 s (3-5 took 72 s with 4rg).
         if best is not None and score[0] <= best[0][0]:
@@ -250,13 +269,12 @@ def choose_horizon(environment: Environment, options: list) -> object:
         if best is None or score > best[0] or (score == best[0] and took < 0.7 * best[2] - 1.0):
             best = (score, horizon, took)
             best_served_all = LAST_SERVED_ALL[0]
+            best_lost_order = LAST_LOST_ORDER[0]
         if score_bound is not None and best[0][0] >= score_bound:
-            print(f"[tmc] reached remaining-score bound {score_bound}",
-                  file=sys.stderr, flush=True)
+            _say(f"[tmc] reached remaining-score bound {score_bound}")
             break
     chosen = best[1] if best is not None else options[0]
-    print(f"[tmc] strategy chosen {chosen!r} after {time.monotonic() - started:.1f}s",
-          file=sys.stderr, flush=True)
+    _say(f"[tmc] strategy chosen {chosen!r} after {time.monotonic() - started:.1f}s")
     remember(key, chosen)
     return chosen
 
