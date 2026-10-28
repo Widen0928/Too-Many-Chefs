@@ -378,7 +378,7 @@ def strategy_options(environment: Environment, options: list) -> list:
         for candidate in ("3swap", "3rswap", "2rswap"):
             if candidate not in options:
                 options.append(candidate)
-    return _tried_first(options)
+    return _tried_first(options, environment)
 
 
 # On a slow grader only the first few strategies get played out. Every
@@ -400,8 +400,23 @@ TRIED_FIRST_SAME_DISH = ("6rg", "4rgo", None, 3, "4r", "3tipfarm", "o", "6rgo", 
 OLD_TIP_STRATEGIES = ("4rgo", "6rgo", "o")
 
 
-def _tried_first(options: list) -> list:
-    same_dish = "3tipfarm" in options
+def _same_dish_queue(environment: Environment) -> bool:
+    """Five or more orders in all, every one the same dish. Counted over the
+    whole queue: a level may show only a few tickets at a time
+    (rules.max_visible_orders), as the hidden 3-2 may."""
+    from simulator.entities import OvercookedState
+
+    state = environment.get_first_entity_of_type(OvercookedState)
+    if state is None:
+        return False
+    entries = [*state.order_queue.visible, *state.order_queue.pending]
+    return len(entries) >= 5 and len({entry.name for entry in entries}) == 1
+
+
+def _tried_first(options: list, environment: Environment | None = None) -> list:
+    same_dish = "3tipfarm" in options or (
+        environment is not None and _same_dish_queue(environment)
+    )
     if same_dish:
         options = options + [o for o in OLD_TIP_STRATEGIES if o not in options]
     front = TRIED_FIRST_SAME_DISH if same_dish else TRIED_FIRST
