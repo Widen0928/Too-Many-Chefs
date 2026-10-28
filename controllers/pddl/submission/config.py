@@ -38,6 +38,9 @@ class Config:
     # only; one more than this many ticks slower cannot win on them
     # (from_pddl._better). None: compare points first, as before.
     tip_tick_slack: int | None = None
+    # Strategies in a row without more points before selection stops, once
+    # the best play-out served every order (strategy.NO_GAIN_STOP).
+    no_gain_stop: int = 6
     selection_seconds: float = 36.0
     # Never start a play-out likely to end after this many seconds. 42 s /
     # 52 s let 3-5 take 73 s on a busy server (limit 90 s); the strategies
