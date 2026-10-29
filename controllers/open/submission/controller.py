@@ -119,6 +119,9 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # or has put down food only that dish needs), so the two do not race for
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+# Call the planner, even with a stored plan that fits, when food already
+# made in the kitchen could make a quicker one.
+MADE_FOOD = __import__("os").environ.get("L4_MADE_FOOD", "0") == "1"
 # Never give a dish up to the teammate while carrying part of it.
 HOLD_ON = __import__("os").environ.get("L4_HOLD_ON", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
@@ -923,7 +926,7 @@ class OpenController(Controller):
                         candidates.append(moved)
                     elif library.valid(steps, init, goal):
                         candidates.append(steps)
-            if not candidates or _made_food_helps(
+            if not candidates or MADE_FOOD and _made_food_helps(
                 environment, kitchen, entry, chef_id, mates[2] if mates else frozenset()
             ):
                 for fast in MODEL_ORDER:
