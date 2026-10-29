@@ -101,6 +101,9 @@ MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
 EXPOSED = float(__import__("os").environ.get("L4_EXPOSED", "0"))
 # Plan around chefs standing in the way; step aside when face to face.
 UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
+# On the way to serve a dish, plan the next one for the kitchen as it will
+# be once it is served, so no ticks go by waiting for the planner after.
+AHEAD = __import__("os").environ.get("L4_AHEAD", "1") == "1"
 # With nothing to do, step off tiles others need.
 PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
 # Prefer storages, plate dispensers and bins on our own side.
@@ -143,6 +146,8 @@ def _short(name: str) -> str:
 
 
 CPU_TICKS = __import__("os").environ.get("L4_CPU_TICKS") == "1"
+# Local evaluation: how much slower the contest host plans than this machine.
+CPU_SCALE = float(__import__("os").environ.get("L4_CPU_SCALE", "1"))
 
 
 def _cpu_now() -> float:
@@ -160,6 +165,11 @@ class OpenController(Controller):
         # Each game creates a new controller instance; this state lasts one game.
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._future: Future | None = None
+        # The plan for after the dish we are about to serve (see AHEAD).
+        self._ahead: Future | None = None
+        self._ahead_tick = 0
+        self._ahead_cost = 0.0
+        self._from_ahead = False
         self._plan: list[MutationWithLocation] = []
         self._target: str | None = None
         self._failed: dict[str, int] = {}
@@ -292,7 +302,8 @@ class OpenController(Controller):
                 plan, target, steps, step_of = [], None, [], []
             self._future = None
             if LOG:
-                print("LOG", environment.timestep, chef.id, "plan", target and _short(target), len(plan), flush=True)
+                print("LOG", environment.timestep, chef.id, "plan", target and _short(target), len(plan),
+                      "cpu", round(_cpu_now() - getattr(self, "_cpu_start", _cpu_now()), 3), flush=True)
             self._plan, self._target = plan, target
             self._steps, self._step_of = steps, step_of
             self._held_back = 0
@@ -301,12 +312,18 @@ class OpenController(Controller):
                 # plan was made (the host waits 120 ms of each 130 ms tick).
                 import math
 
-                cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
-                self._hold_until = environment.timestep + max(0, math.ceil((cost - 0.12) / 0.13))
+                if self._from_ahead:
+                    # Made while we walked to the hatch: only what is left over.
+                    lost = math.ceil((self._ahead_cost * CPU_SCALE - 0.12) / 0.13) - (environment.timestep - self._ahead_tick)
+                else:
+                    cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
+                    lost = math.ceil((cost * CPU_SCALE - 0.12) / 0.13)
+                self._hold_until = environment.timestep + max(0, lost)
             elif CALL_TICKS and WAIT_SECONDS is None:
                 self._hold_until = environment.timestep + round(CALL_TICKS * self._calls)
             self._calls = 0
             self._stuck = 0
+            self._from_ahead = False
             if not plan:
                 # Nothing worth doing right now: look again shortly.
                 self._idle_until = environment.timestep + 3
@@ -321,6 +338,15 @@ class OpenController(Controller):
             self._stuck = STUCK_TICKS + 1
             if LOG:
                 self._last_yield_tick = environment.timestep
+        if (
+            AHEAD
+            and self._future is None
+            and self._ahead is None
+            and len(self._plan) == 1
+            and type(self._plan[0].mutation).__name__ == "Deliver"
+            and self._plan[0].location is not None
+        ):
+            self._plan_ahead(environment, chef)
         if self._future is None and environment.timestep >= self._idle_until and (
             not self._plan
             or (self._target is not None and self._target not in visible)
@@ -351,12 +377,17 @@ class OpenController(Controller):
             # it (the planner can use what is already made) unless that
             # fails.
             keep = self._target if self._plan and self._target in visible and STICKY else None
-            self._plan, self._step_of = [], []
-            self._cpu_start = _cpu_now()
-            self._future = self._executor.submit(
-                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep,
-                self._teammates_things(environment, chef) if RESPECT_MATES else None,
-            )
+            ahead, self._ahead = self._ahead, None
+            if ahead is not None and not self._plan:
+                # The dish is served and the next plan is (being) made.
+                self._future, self._from_ahead = ahead, True
+            else:
+                self._plan, self._step_of = [], []
+                self._cpu_start = _cpu_now()
+                self._future = self._executor.submit(
+                    self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep,
+                    self._teammates_things(environment, chef) if RESPECT_MATES else None,
+                )
             try:
                 self._future.result(timeout=self._wait_left())
             except Exception:  # noqa: BLE001
@@ -372,6 +403,47 @@ class OpenController(Controller):
         if not self._plan or environment.timestep < self._hold_until:
             return []
         return self._follow(environment, chef)
+
+    def _plan_ahead(self, environment: Environment, chef: Agent) -> None:
+        """Start planning the next dish for the kitchen as it will be once
+        the dish in hand is served: the chef stood by the hatch, delivering."""
+        step = self._plan[0]
+        position = (chef.x, chef.y)
+        others = {
+            (a.x, a.y) for a in environment.get_entities_of_type(Agent)
+            if a.id != chef.id and a.x is not None
+        }
+        tiles = [t for t in _goal_tiles(step.location) if t in (self._floor or set()) and t not in others]
+        if not tiles:
+            return
+        tile = min(tiles, key=lambda t: abs(t[0] - position[0]) + abs(t[1] - position[1]))
+        try:
+            after = environment.model_copy(deep=True)
+            me = after.get_entity(chef.id)
+            me.x, me.y = tile
+            me.orientation = _facing(tile, step.location)
+            after = after.step([step.mutation])
+            if after.get_entity(chef.id).held_item_id is not None:
+                return  # the dish would not be taken: plan as usual after
+        except Exception:  # noqa: BLE001
+            return
+        self._ahead_tick = environment.timestep
+        args = (
+            after, chef.id, self._parked(environment, chef.id), None, None,
+            self._teammates_things(environment, chef) if RESPECT_MATES else None,
+        )
+        if WAIT_SECONDS is None:
+            # Local evaluation: make it now and charge its time later.
+            start = _cpu_now()
+            future: Future = Future()
+            try:
+                future.set_result(self._make_plan(*args))
+            except Exception as error:  # noqa: BLE001
+                future.set_exception(error)
+            self._ahead_cost = _cpu_now() - start
+            self._ahead = future
+        else:
+            self._ahead = self._executor.submit(self._make_plan, *args)
 
     def _mate_makes_target(self, environment: Environment, chef: Agent, state) -> bool:
         """Whether a teammate visibly makes the dish we are only starting,
