@@ -118,10 +118,10 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # Give up a dish early on once the teammate is visibly making it too (holds
 # or has put down food only that dish needs), so the two do not race for
 # the same ticket and one of them throw its work away.
-YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+YIELD = __import__("os").environ.get("L4_YIELD", "0") == "1"
 # Call the planner, even with a stored plan that fits, when food already
 # made in the kitchen could make a quicker one.
-MADE_FOOD = __import__("os").environ.get("L4_MADE_FOOD", "0") == "1"
+MADE_FOOD = __import__("os").environ.get("L4_MADE_FOOD", "1") == "1"
 # With something in hand, fit a stored plan to it (start partway, or put
 # it down first) before calling the planner.
 ADAPT = int(__import__("os").environ.get("L4_ADAPT", "1"))
