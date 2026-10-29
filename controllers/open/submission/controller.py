@@ -122,6 +122,9 @@ YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
 # Call the planner, even with a stored plan that fits, when food already
 # made in the kitchen could make a quicker one.
 MADE_FOOD = __import__("os").environ.get("L4_MADE_FOOD", "0") == "1"
+# With something in hand, fit a stored plan to it (start partway, or put
+# it down first) before calling the planner.
+ADAPT = int(__import__("os").environ.get("L4_ADAPT", "1"))
 # Never give a dish up to the teammate while carrying part of it.
 HOLD_ON = __import__("os").environ.get("L4_HOLD_ON", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
@@ -324,6 +327,8 @@ class OpenController(Controller):
                     cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
                     lost = math.ceil((cost * CPU_SCALE - 0.12) / 0.13)
                 self._hold_until = environment.timestep + max(0, lost)
+                if LOG:
+                    print("LOG", environment.timestep, chef.id, "lost", max(0, lost), "ahead" if self._from_ahead else "fresh", flush=True)
             elif CALL_TICKS and WAIT_SECONDS is None:
                 self._hold_until = environment.timestep + round(CALL_TICKS * self._calls)
             self._calls = 0
@@ -920,12 +925,22 @@ class OpenController(Controller):
                 if not USE_LIBRARY:
                     continue
                 init, goal = library.facts(text)
+                found = len(candidates)
                 for steps in library.plans_for(dish, c):
                     moved = relocated(steps)
                     if library.valid(moved, init, goal):
                         candidates.append(moved)
                     elif library.valid(steps, init, goal):
                         candidates.append(steps)
+                if ADAPT and len(candidates) == found:
+                    for steps in library.plans_for(dish, c):
+                        fits = library.adapted(steps, init, goal, c, ADAPT > 1)
+                        candidates += fits or [
+                            relocated(st) for st in library.adapted(relocated(steps), init, goal, c, ADAPT > 1)
+                        ]
+            if LOG and not candidates:
+                print("LOG", environment.timestep, chef_id, "nolib", dish, "held",
+                      sorted(_held_foods(environment, next(a for a in environment.get_entities_of_type(Agent) if a.id == chef_id))) , flush=True)
             if not candidates or MADE_FOOD and _made_food_helps(
                 environment, kitchen, entry, chef_id, mates[2] if mates else frozenset()
             ):
