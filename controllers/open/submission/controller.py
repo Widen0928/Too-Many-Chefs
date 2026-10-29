@@ -101,9 +101,6 @@ MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
 EXPOSED = float(__import__("os").environ.get("L4_EXPOSED", "0"))
 # Plan around chefs standing in the way; step aside when face to face.
 UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
-# Face to face with an opponent: always step aside (1), or only when our id
-# is the larger, as with a teammate (0).
-YIELD_OPP = __import__("os").environ.get("L4_YIELD_OPP", "0") == "1"
 # With nothing to do, step off tiles others need.
 PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
 # Prefer storages, plate dispensers and bins on our own side.
@@ -730,7 +727,7 @@ class OpenController(Controller):
                 UNJAM
                 and head_on is not None
                 and self._blocked_ticks >= 2
-                and ((YIELD_OPP and head_on.team != chef.team) or chef.id > head_on.id)
+                and (head_on.team != chef.team or chef.id > head_on.id)
             ):
                 # Face to face in a corridor: step aside to let them by.
                 side = self._side_step(position, direct_step, others)
