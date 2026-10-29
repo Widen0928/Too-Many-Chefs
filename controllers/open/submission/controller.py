@@ -119,6 +119,8 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # or has put down food only that dish needs), so the two do not race for
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+# Never give a dish up to the teammate while carrying part of it.
+HOLD_ON = __import__("os").environ.get("L4_HOLD_ON", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
 # Wait beside food that is cooking by itself for as long as it takes, not a
 # count of ticks fixed when the wait began.
@@ -457,6 +459,8 @@ class OpenController(Controller):
         tickets = sum(1 for entry in visible if entry.name == self._target)
         if tickets == 0:
             return False
+        if HOLD_ON and _held_foods(environment, chef) & _components(state, self._target):
+            return False  # already carrying part of it: giving up wastes that
         put_down = self._teammates_things(environment, chef)[3] if RESPECT_MATES else {}
         makers = sum(
             1
@@ -1051,7 +1055,11 @@ class OpenController(Controller):
 
         skipped = list(left_to_mates)
 
+        mine = _held_foods(environment, me_agent)
+
         def leave(entry) -> bool:
+            if HOLD_ON and mine & _components(state, entry.name):
+                return False  # we carry part of it too: finish it
             if entry.name in skipped:
                 skipped.remove(entry.name)  # one order per dish a teammate makes
                 return True
