@@ -171,32 +171,3 @@ def export() -> dict:
         dish: [[name, *params] for name, params in plans]
         for dish, plans in _LIBRARY.items()
     }
-
-
-def adapted(steps: list[PDDLPlanStep], init: frozenset, goal: list[tuple], chef: str, put_down=True):
-    """``steps`` fitted to a chef whose hands are not empty: the plan from a
-    later step on (what is held is already part of the dish), or first
-    putting down (or throwing away) what is held. Only valid plans."""
-    c = chef.lower()
-    held = [f[2] for f in init if f[0] == "holds" and f[1] == c]
-    if not held:
-        return []
-    out = []
-    for i in range(1, len(steps)):
-        if valid(steps[i:], init, goal):
-            out.append(steps[i:])
-            break
-    if out or not put_down:
-        return out
-    thing = held[0]
-    reach = {f[2] for f in init if f[0] == "reach" and f[1] == c}
-    spots = []
-    if ("placeable", thing) in init:
-        spots += [PDDLPlanStep("put_down", (chef, f[1], thing)) for f in init
-                  if f[0] == "free" and f[1] in reach]
-    spots += [PDDLPlanStep("discard_food", (chef, f[1], thing)) for f in init
-              if f[0] == "bin" and f[1] in reach]
-    for first in spots:
-        if valid([first] + steps, init, goal):
-            out.append([first] + steps)
-    return out

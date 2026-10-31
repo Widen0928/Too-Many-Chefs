@@ -40,13 +40,6 @@ from simulator.mutations import Mutation, MutationWithLocation, TurnAgent
 from simulator.mutations.move_agent import MoveAgent
 from simulator.mutations.mutation import can_apply_mutation
 
-
-def _env(name: str, default=None):
-    """A local-evaluation flag; L4O_<name> sets it for this controller only."""
-    environ = __import__("os").environ
-    return environ.get("L4O_" + name, environ.get("L4_" + name, default))
-
-
 # Steps each dish takes one chef in the tournament kitchen: the quickest plan in
 # the library (tools/l4_library.py) plus 15% for other chefs in the way.
 EXPECTED_STEPS = {
@@ -68,90 +61,79 @@ BLOCKED_TICKS = 5
 # Ticks a chef must stand still to count as an obstacle for planning.
 PARKED_TICKS = 3
 # Which model to plan with first: the quick one (True) or the tip-keeping one.
-MODEL_ORDER = (True, False) if _env("FAST", "1") == "1" else (False, True)
+MODEL_ORDER = (True, False) if __import__("os").environ.get("L4_FAST", "1") == "1" else (False, True)
 # Orders planned together (see _make_plan).
-ORDERS_PER_PLAN = int(_env("ORDERS", "1"))
+ORDERS_PER_PLAN = int(__import__("os").environ.get("L4_ORDERS", "1"))
 # Seconds to wait for the planner within a tick (the host allows 200 ms).
 # L4_SYNC (local evaluation only) waits for every plan, so runs repeat.
-WAIT_SECONDS = None if _env("SYNC") else 0.12
+WAIT_SECONDS = None if __import__("os").environ.get("L4_SYNC") else 0.12
 # Seconds the planner may take for one order.
 PLAN_SECONDS = 3.0
 # A way round another chef is taken at once if it is at most this much
 # longer than the direct way; otherwise the chef waits a few ticks first.
-DETOUR_SLACK = int(_env("SLACK", "2"))
-MAX_WAIT = int(_env("MAX_WAIT", "8"))
-BLOCKED_EXTRA = int(_env("BLOCKED_EXTRA", "8"))
+DETOUR_SLACK = int(__import__("os").environ.get("L4_SLACK", "2"))
+MAX_WAIT = int(__import__("os").environ.get("L4_MAX_WAIT", "8"))
+BLOCKED_EXTRA = int(__import__("os").environ.get("L4_BLOCKED_EXTRA", "8"))
 # Swap the plan's stations for nearer equivalents.
-RELOCATE = _env("RELOCATE", "1") == "1"
-NEW_WALK = _env("WALK", "1") == "1"
-USE_LIBRARY = _env("LIBRARY", "1") == "1"
+RELOCATE = __import__("os").environ.get("L4_RELOCATE", "1") == "1"
+NEW_WALK = __import__("os").environ.get("L4_WALK", "1") == "1"
+USE_LIBRARY = __import__("os").environ.get("L4_LIBRARY", "1") == "1"
 # Local evaluation only (with L4_SYNC): ticks each planner call would cost
 # in a real match, where the host does not wait for the planner.
-CALL_TICKS = int(_env("CALL_TICKS", "0"))
+CALL_TICKS = int(__import__("os").environ.get("L4_CALL_TICKS", "0"))
 # Ticks between two attempts to mend a plan rather than plan afresh.
 REPAIR_GAP = 20
-REPAIR = _env("REPAIR", "1") == "1"
-EARLY = _env("EARLY", "1") == "1"
+REPAIR = __import__("os").environ.get("L4_REPAIR", "1") == "1"
+EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 # Leave alone orders an opponent is visibly making (holds part of).
-RACE_CHECK = _env("RACE_CHECK", "0") == "1"
+RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
-USE_MADE = _env("MADE", "1") == "1"
+USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
 # Leave food teammates put in stations or on counters to them, and read
 # what they are cooking from it.
-RESPECT_MATES = _env("RESPECT_MATES", "1") == "1"
+RESPECT_MATES = __import__("os").environ.get("L4_RESPECT_MATES", "1") == "1"
 ABANDONED_TICKS = 40
 # Count the teammate in the order auction (right when it runs this code);
 # otherwise only orders it visibly makes are left to it.
-MATE_AUCTION = _env("MATE_AUCTION", "0") == "1"
+MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
 # Weight of the ticks our food sits unattended in a shared station when
 # choosing between plans (others may take it).
-EXPOSED = float(_env("EXPOSED", "0"))
+EXPOSED = float(__import__("os").environ.get("L4_EXPOSED", "0"))
 # Plan around chefs standing in the way; step aside when face to face.
-UNJAM = _env("UNJAM", "1") == "1"
-# On the way to serve a dish, plan the next one for the kitchen as it will
-# be once it is served, so no ticks go by waiting for the planner after.
-AHEAD = _env("AHEAD", "1") == "1"
+UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
 # With nothing to do, step off tiles others need.
-PARK = _env("PARK", "1") == "1"
+PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
 # Prefer storages, plate dispensers and bins on our own side.
-AVOID = _env("AVOID", "1") == "1"
+AVOID = __import__("os").environ.get("L4_AVOID", "1") == "1"
 # Plan with only the foods that matter for the dish (much quicker), and
 # what that costs in a match (ticks, for local evaluation).
-PRUNE = _env("PRUNE", "1") == "1"
-PRUNED_TICKS = float(_env("PRUNED_TICKS", "1"))
+PRUNE = __import__("os").environ.get("L4_PRUNE", "1") == "1"
+PRUNED_TICKS = float(__import__("os").environ.get("L4_PRUNED_TICKS", "1"))
 # After getting stuck, plan the same dish again first.
-STICKY = _env("STICKY", "0") == "1"
+STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # Local evaluation only: print plans started and dishes served.
 # Give up a dish early on once the teammate is visibly making it too (holds
 # or has put down food only that dish needs), so the two do not race for
 # the same ticket and one of them throw its work away.
-YIELD = _env("YIELD", "1") == "1"
-# Call the planner, even with a stored plan that fits, when food already
-# made in the kitchen could make a quicker one.
-MADE_FOOD = _env("MADE_FOOD", "1") == "1"
-# With something in hand, fit a stored plan to it (start partway, or put
-# it down first) before calling the planner.
-ADAPT = int(_env("ADAPT", "1"))
-# Never give a dish up to the teammate while carrying part of it.
-HOLD_ON = _env("HOLD_ON", "1") == "1"
-YIELD_FRACTION = float(_env("YIELD_FRACTION", "0.4"))
+YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
 # Wait beside food that is cooking by itself for as long as it takes, not a
 # count of ticks fixed when the wait began.
-PATIENT = _env("PATIENT", "1") == "1"
+PATIENT = __import__("os").environ.get("L4_PATIENT", "1") == "1"
 # Skip the rough time check for an order part of which is already made: the
 # plan's own timing decides.
-PROGRESS = _env("PROGRESS", "1") == "1"
+PROGRESS = __import__("os").environ.get("L4_PROGRESS", "1") == "1"
 # Multiplier applied to EXPECTED_STEPS for the rough-time pre-filter in
 # _choose_orders.  Orders with time_left < EXPECTED_STEPS * ROUGH_FRAC are
 # skipped before the planner is called.  Default 0.8 matches the original
 # hard-coded value; lower values admit more near-deadline orders (tested:
 # held-ingredient variants hurt mixed mode, reverted).
-ROUGH_FRAC = float(_env("ROUGH_FRAC", "0.8"))
-LOG = _env("LOG") == "1"
+ROUGH_FRAC = float(__import__("os").environ.get("L4_ROUGH_FRAC", "0.8"))
+LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
-GAME_TICKS = int(_env("GAME_TICKS", "300"))
+GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
 # Drop orders that cannot be served in time even as a last resort.
-STRICT = _env("STRICT", "1") == "1"
+STRICT = __import__("os").environ.get("L4_STRICT", "1") == "1"
 # Matches run slower than the plan's estimate (other chefs in the way).
 SLACK = 1.15
 
@@ -160,9 +142,7 @@ def _short(name: str) -> str:
     return name.rsplit("/", 1)[-1]
 
 
-CPU_TICKS = _env("CPU_TICKS") == "1"
-# Local evaluation: how much slower the contest host plans than this machine.
-CPU_SCALE = float(_env("CPU_SCALE", "1"))
+CPU_TICKS = __import__("os").environ.get("L4_CPU_TICKS") == "1"
 
 
 def _cpu_now() -> float:
@@ -180,11 +160,6 @@ class OpenController(Controller):
         # Each game creates a new controller instance; this state lasts one game.
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._future: Future | None = None
-        # The plan for after the dish we are about to serve (see AHEAD).
-        self._ahead: Future | None = None
-        self._ahead_tick = 0
-        self._ahead_cost = 0.0
-        self._from_ahead = False
         self._plan: list[MutationWithLocation] = []
         self._target: str | None = None
         self._failed: dict[str, int] = {}
@@ -317,8 +292,7 @@ class OpenController(Controller):
                 plan, target, steps, step_of = [], None, [], []
             self._future = None
             if LOG:
-                print("LOG", environment.timestep, chef.id, "plan", target and _short(target), len(plan),
-                      "cpu", round(_cpu_now() - getattr(self, "_cpu_start", _cpu_now()), 3), flush=True)
+                print("LOG", environment.timestep, chef.id, "plan", target and _short(target), len(plan), flush=True)
             self._plan, self._target = plan, target
             self._steps, self._step_of = steps, step_of
             self._held_back = 0
@@ -327,20 +301,12 @@ class OpenController(Controller):
                 # plan was made (the host waits 120 ms of each 130 ms tick).
                 import math
 
-                if self._from_ahead:
-                    # Made while we walked to the hatch: only what is left over.
-                    lost = math.ceil((self._ahead_cost * CPU_SCALE - 0.12) / 0.13) - (environment.timestep - self._ahead_tick)
-                else:
-                    cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
-                    lost = math.ceil((cost * CPU_SCALE - 0.12) / 0.13)
-                self._hold_until = environment.timestep + max(0, lost)
-                if LOG:
-                    print("LOG", environment.timestep, chef.id, "lost", max(0, lost), "ahead" if self._from_ahead else "fresh", flush=True)
+                cost = _cpu_now() - getattr(self, "_cpu_start", _cpu_now())
+                self._hold_until = environment.timestep + max(0, math.ceil((cost - 0.12) / 0.13))
             elif CALL_TICKS and WAIT_SECONDS is None:
                 self._hold_until = environment.timestep + round(CALL_TICKS * self._calls)
             self._calls = 0
             self._stuck = 0
-            self._from_ahead = False
             if not plan:
                 # Nothing worth doing right now: look again shortly.
                 self._idle_until = environment.timestep + 3
@@ -355,15 +321,6 @@ class OpenController(Controller):
             self._stuck = STUCK_TICKS + 1
             if LOG:
                 self._last_yield_tick = environment.timestep
-        if (
-            AHEAD
-            and self._future is None
-            and self._ahead is None
-            and len(self._plan) == 1
-            and type(self._plan[0].mutation).__name__ == "Deliver"
-            and self._plan[0].location is not None
-        ):
-            self._plan_ahead(environment, chef)
         if self._future is None and environment.timestep >= self._idle_until and (
             not self._plan
             or (self._target is not None and self._target not in visible)
@@ -394,17 +351,12 @@ class OpenController(Controller):
             # it (the planner can use what is already made) unless that
             # fails.
             keep = self._target if self._plan and self._target in visible and STICKY else None
-            ahead, self._ahead = self._ahead, None
-            if ahead is not None and not self._plan:
-                # The dish is served and the next plan is (being) made.
-                self._future, self._from_ahead = ahead, True
-            else:
-                self._plan, self._step_of = [], []
-                self._cpu_start = _cpu_now()
-                self._future = self._executor.submit(
-                    self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep,
-                    self._teammates_things(environment, chef) if RESPECT_MATES else None,
-                )
+            self._plan, self._step_of = [], []
+            self._cpu_start = _cpu_now()
+            self._future = self._executor.submit(
+                self._make_plan, environment, chef.id, self._parked(environment, chef.id), repair, keep,
+                self._teammates_things(environment, chef) if RESPECT_MATES else None,
+            )
             try:
                 self._future.result(timeout=self._wait_left())
             except Exception:  # noqa: BLE001
@@ -421,47 +373,6 @@ class OpenController(Controller):
             return []
         return self._follow(environment, chef)
 
-    def _plan_ahead(self, environment: Environment, chef: Agent) -> None:
-        """Start planning the next dish for the kitchen as it will be once
-        the dish in hand is served: the chef stood by the hatch, delivering."""
-        step = self._plan[0]
-        position = (chef.x, chef.y)
-        others = {
-            (a.x, a.y) for a in environment.get_entities_of_type(Agent)
-            if a.id != chef.id and a.x is not None
-        }
-        tiles = [t for t in _goal_tiles(step.location) if t in (self._floor or set()) and t not in others]
-        if not tiles:
-            return
-        tile = min(tiles, key=lambda t: abs(t[0] - position[0]) + abs(t[1] - position[1]))
-        try:
-            after = environment.model_copy(deep=True)
-            me = after.get_entity(chef.id)
-            me.x, me.y = tile
-            me.orientation = _facing(tile, step.location)
-            after = after.step([step.mutation])
-            if after.get_entity(chef.id).held_item_id is not None:
-                return  # the dish would not be taken: plan as usual after
-        except Exception:  # noqa: BLE001
-            return
-        self._ahead_tick = environment.timestep
-        args = (
-            after, chef.id, self._parked(environment, chef.id), None, None,
-            self._teammates_things(environment, chef) if RESPECT_MATES else None,
-        )
-        if WAIT_SECONDS is None:
-            # Local evaluation: make it now and charge its time later.
-            start = _cpu_now()
-            future: Future = Future()
-            try:
-                future.set_result(self._make_plan(*args))
-            except Exception as error:  # noqa: BLE001
-                future.set_exception(error)
-            self._ahead_cost = _cpu_now() - start
-            self._ahead = future
-        else:
-            self._ahead = self._executor.submit(self._make_plan, *args)
-
     def _mate_makes_target(self, environment: Environment, chef: Agent, state) -> bool:
         """Whether a teammate visibly makes the dish we are only starting,
         with no second ticket for it."""
@@ -474,8 +385,6 @@ class OpenController(Controller):
         tickets = sum(1 for entry in visible if entry.name == self._target)
         if tickets == 0:
             return False
-        if HOLD_ON and _held_foods(environment, chef) & _components(state, self._target):
-            return False  # already carrying part of it: giving up wastes that
         put_down = self._teammates_things(environment, chef)[3] if RESPECT_MATES else {}
         makers = sum(
             1
@@ -932,23 +841,13 @@ class OpenController(Controller):
                 if not USE_LIBRARY:
                     continue
                 init, goal = library.facts(text)
-                found = len(candidates)
                 for steps in library.plans_for(dish, c):
                     moved = relocated(steps)
                     if library.valid(moved, init, goal):
                         candidates.append(moved)
                     elif library.valid(steps, init, goal):
                         candidates.append(steps)
-                if ADAPT and len(candidates) == found:
-                    for steps in library.plans_for(dish, c):
-                        fits = library.adapted(steps, init, goal, c, ADAPT > 1)
-                        candidates += fits or [
-                            relocated(st) for st in library.adapted(relocated(steps), init, goal, c, ADAPT > 1)
-                        ]
-            if LOG and not candidates:
-                print("LOG", environment.timestep, chef_id, "nolib", dish, "held",
-                      sorted(_held_foods(environment, next(a for a in environment.get_entities_of_type(Agent) if a.id == chef_id))) , flush=True)
-            if not candidates or MADE_FOOD and _made_food_helps(
+            if not candidates or _made_food_helps(
                 environment, kitchen, entry, chef_id, mates[2] if mates else frozenset()
             ):
                 for fast in MODEL_ORDER:
@@ -1080,11 +979,7 @@ class OpenController(Controller):
 
         skipped = list(left_to_mates)
 
-        mine = _held_foods(environment, me_agent)
-
         def leave(entry) -> bool:
-            if HOLD_ON and mine & _components(state, entry.name):
-                return False  # we carry part of it too: finish it
             if entry.name in skipped:
                 skipped.remove(entry.name)  # one order per dish a teammate makes
                 return True
