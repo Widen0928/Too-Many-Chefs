@@ -117,18 +117,6 @@ STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # the same ticket and one of them throw its work away.
 YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
 YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
-# Wait beside food that is cooking by itself for as long as it takes, not a
-# count of ticks fixed when the wait began.
-PATIENT = __import__("os").environ.get("L4_PATIENT", "1") == "1"
-# Skip the rough time check for an order part of which is already made: the
-# plan's own timing decides.
-PROGRESS = __import__("os").environ.get("L4_PROGRESS", "1") == "1"
-# Multiplier applied to EXPECTED_STEPS for the rough-time pre-filter in
-# _choose_orders.  Orders with time_left < EXPECTED_STEPS * ROUGH_FRAC are
-# skipped before the planner is called.  Default 0.8 matches the original
-# hard-coded value; lower values admit more near-deadline orders (tested:
-# held-ingredient variants hurt mixed mode, reverted).
-ROUGH_FRAC = float(__import__("os").environ.get("L4_ROUGH_FRAC", "0.8"))
 LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
 GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
@@ -191,18 +179,10 @@ class OpenController(Controller):
         self._contents: dict[str, str] = {}
         self._prev_held: dict[str, set] = {}
         self._owned_since: dict[str, int] = {}
-        # Waste-category subcounters (only used when LOG is on).
-        self._last_none_tick: int = -999
-        self._last_yield_tick: int = -999
-        self._block_is_food: bool = False
 
     # --- Controller interface -----------------------------------------------
 
     def get_actions(self, environment: Environment, context: Context) -> list[Mutation]:
-        # One budget for all waiting on the planner within this tick: waiting
-        # for the last plan and then for the next one could otherwise take
-        # twice WAIT_SECONDS and miss the host's 200 ms.
-        self._deadline = time.monotonic() + (WAIT_SECONDS or 0.0)
         try:
             actions = self._act(environment)
         except Exception:  # noqa: BLE001 - never lose a set to an error
@@ -223,17 +203,6 @@ class OpenController(Controller):
             else:
                 kind = "blocked"
             self._ticks_by_kind[kind] = self._ticks_by_kind.get(kind, 0) + 1
-            # Subcategories for waste analysis (l4_waste.py).
-            now_t = environment.timestep
-            if kind in ("blocked", "wait") and self._block_is_food:
-                self._ticks_by_kind["food"] = self._ticks_by_kind.get("food", 0) + 1
-            elif kind == "idle":
-                if now_t - self._last_none_tick < 5:
-                    self._ticks_by_kind["impossible"] = self._ticks_by_kind.get("impossible", 0) + 1
-                elif now_t - self._last_yield_tick < 12:
-                    self._ticks_by_kind["yield_idle"] = self._ticks_by_kind.get("yield_idle", 0) + 1
-            elif kind == "planning" and now_t - self._last_yield_tick < 20:
-                self._ticks_by_kind["yield_plan"] = self._ticks_by_kind.get("yield_plan", 0) + 1
         if actions:
             return actions
         # Idle: answer with a turn on the spot, so every tick gets an action.
@@ -242,13 +211,6 @@ class OpenController(Controller):
             return [TurnAgent(agent_id=chef.id, orientation=chef.orientation)]
         except Exception:  # noqa: BLE001
             return []
-
-    def _wait_left(self) -> float | None:
-        """Seconds still to wait for the planner this tick (None: wait for it,
-        as local evaluation does with L4_SYNC)."""
-        if WAIT_SECONDS is None:
-            return None
-        return max(0.0, getattr(self, "_deadline", 0.0) - time.monotonic())
 
     def is_busy(self) -> bool:
         return False
@@ -282,7 +244,7 @@ class OpenController(Controller):
             # The host waits for our answer (up to 200 ms) before the kitchen
             # moves on, so waiting here costs no game time; idling would.
             try:
-                self._future.result(timeout=self._wait_left())
+                self._future.result(timeout=WAIT_SECONDS)
             except Exception:  # noqa: BLE001 - timeouts included
                 pass
         if self._future is not None and self._future.done():
@@ -310,8 +272,6 @@ class OpenController(Controller):
             if not plan:
                 # Nothing worth doing right now: look again shortly.
                 self._idle_until = environment.timestep + 3
-                if LOG:
-                    self._last_none_tick = environment.timestep
             if not plan and target:
                 self._failed[target] = environment.timestep
 
@@ -319,8 +279,6 @@ class OpenController(Controller):
         if YIELD and self._future is None and self._plan and self._mate_makes_target(environment, chef, state):
             self._why = "mate"
             self._stuck = STUCK_TICKS + 1
-            if LOG:
-                self._last_yield_tick = environment.timestep
         if self._future is None and environment.timestep >= self._idle_until and (
             not self._plan
             or (self._target is not None and self._target not in visible)
@@ -358,7 +316,7 @@ class OpenController(Controller):
                 self._teammates_things(environment, chef) if RESPECT_MATES else None,
             )
             try:
-                self._future.result(timeout=self._wait_left())
+                self._future.result(timeout=WAIT_SECONDS)
             except Exception:  # noqa: BLE001
                 pass
             if self._future.done() and not getattr(self, "_retrying", False):
@@ -462,10 +420,7 @@ class OpenController(Controller):
             held_now[a.id] = things
         for cls in (Equipment, Counter):
             for container in environment.get_entities_of_type(cls):
-                if isinstance(container, Plate) or container.x is None or container.y is None:
-                    # A pot or bowl a chef is carrying has no tile; other
-                    # controllers do carry them, food and all. Leave it be
-                    # (it gets an owner again where it is put down).
+                if isinstance(container, Plate):
                     continue
                 item = container.held_item_id
                 entity = environment.get_entity(item) if item else None
@@ -570,8 +525,6 @@ class OpenController(Controller):
         }
 
     def _follow(self, environment: Environment, chef: Agent) -> list[Mutation]:
-        if LOG:
-            self._block_is_food = False
         step = self._plan[0]
         mutation = step.mutation
         target = step.location
@@ -601,10 +554,6 @@ class OpenController(Controller):
             # (another chef's food in the station we meant to use, say)
             # will not sort itself out, so plan again.
             self._held_back += 1
-            if PATIENT and _cooking(environment, target):
-                self._held_back = 0  # done in a few ticks, whoever's it is
-                if LOG:
-                    self._block_is_food = True
             if self._held_back > _patience(environment, target):
                 if LOG:
                     from simulator.entities import Equipment
@@ -891,15 +840,6 @@ class OpenController(Controller):
             left = GAME_TICKS - now
             if entry.time_limit is not None:
                 left = min(left, entry.revealed_at + entry.time_limit - now)
-            if LOG:
-                if left >= quickest * SLACK + 3:
-                    chk = "ok"
-                elif quickest + 2 <= left or not STRICT:
-                    chk = "reserve"
-                else:
-                    chk = "too_late"
-                print("LOG", now, chef_id, "plan_check", dish,
-                      f"planned={quickest:.0f}", f"deadline={left:.0f}", chk, flush=True)
             if left < quickest * SLACK + 3:
                 # Would not make it in time (the order expires, or the game
                 # ends): try the next order, keeping this one in reserve.
@@ -915,13 +855,6 @@ class OpenController(Controller):
                 done = finish(candidates[i], entry)
                 if done:
                     return done
-        if LOG:
-            state = environment.get_first_entity_of_type(OvercookedState)
-            now = environment.timestep
-            print("LOG", now, chef_id, "none", [_short(e.name) for e in choices], "reserve",
-                  [(_short(e.name), round(q)) for q, e, *_ in reserve], "visible",
-                  [(_short(e.name), e.revealed_at + (e.time_limit or 0) - now) for e in state.order_queue.visible],
-                  flush=True)
         return [], None, [], []
 
     def _choose_orders(self, environment: Environment, chef_id: str) -> list:
@@ -985,39 +918,13 @@ class OpenController(Controller):
                 return True
             return False
 
-        made = (
-            {f.name for f in environment.get_entities_of_type(Food) if not state.is_raw_food(f.name)}
-            if PROGRESS else set()
-        )
-
-        def rough_time(entry) -> float:
-            if made & _components(state, entry.name):
-                return 8.0  # partly made already: let the planner time it
-            return EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * ROUGH_FRAC
-
         open_orders = [
             (i, entry)
             for i, entry in enumerate(visible)
             if not leave(entry)
-            and time_left(entry) >= rough_time(entry)
+            and time_left(entry) >= EXPECTED_STEPS.get(_short(entry.name), DEFAULT_STEPS) * 0.8
             and now - self._failed.get(entry.name, -999) >= 20
         ]
-        if LOG:
-            open_idx = {i for i, _ in open_orders}
-            for i, entry in enumerate(visible):
-                tl = time_left(entry)
-                rt = rough_time(entry)
-                e = eta(me_agent, entry)
-                if i in open_idx:
-                    reason = "ok"
-                elif now - self._failed.get(entry.name, -999) < 20:
-                    reason = "cooldown"
-                elif entry.name in left_to_mates:
-                    reason = "mate"
-                else:
-                    reason = "too_late"
-                print("LOG", now, chef_id, "pick", _short(entry.name),
-                      f"eta={e:.0f}", f"deadline={tl:.0f}", reason, flush=True)
         hatch = next(
             ((d.x, d.y) for d in environment.get_entities_of_type(Delivery)), (0, 0)
         )
@@ -1154,20 +1061,6 @@ def _next_move(environment: Environment, chef: Agent, target) -> MoveAgent | Non
                 previous[nxt] = tile
                 queue.append(nxt)
     return None
-
-
-def _cooking(environment: Environment, target) -> bool:
-    """Whether food is cooking by itself at ``target`` and not done yet."""
-    from simulator.entities import Equipment
-    from simulator.mutations.cooking import cooking_progress
-
-    for item in environment.get_entities_of_type(Equipment):
-        if (item.x, item.y) != tuple(target) or isinstance(item, Plate) or not item.cooks_by_itself:
-            continue
-        progress = cooking_progress(environment, item)
-        if progress is not None and progress < 1:
-            return True
-    return False
 
 
 def _patience(environment: Environment, target) -> int:
