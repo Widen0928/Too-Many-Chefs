@@ -61,88 +61,79 @@ BLOCKED_TICKS = 5
 # Ticks a chef must stand still to count as an obstacle for planning.
 PARKED_TICKS = 3
 # Which model to plan with first: the quick one (True) or the tip-keeping one.
-
-def _env(name: str, default=None):
-    """A local-evaluation flag; L4O_<name> sets it for this controller only."""
-    environ = __import__("os").environ
-    return environ.get("L4O_" + name, environ.get("L4_" + name, default))
-
-MODEL_ORDER = (True, False) if _env("FAST", "1") == "1" else (False, True)
+MODEL_ORDER = (True, False) if __import__("os").environ.get("L4_FAST", "1") == "1" else (False, True)
 # Orders planned together (see _make_plan).
-ORDERS_PER_PLAN = int(_env("ORDERS", "1"))
+ORDERS_PER_PLAN = int(__import__("os").environ.get("L4_ORDERS", "1"))
 # Seconds to wait for the planner within a tick (the host allows 200 ms).
 # L4_SYNC (local evaluation only) waits for every plan, so runs repeat.
-WAIT_SECONDS = None if _env("SYNC") else 0.12
+WAIT_SECONDS = None if __import__("os").environ.get("L4_SYNC") else 0.12
 # Seconds the planner may take for one order.
 PLAN_SECONDS = 3.0
 # A way round another chef is taken at once if it is at most this much
 # longer than the direct way; otherwise the chef waits a few ticks first.
-DETOUR_SLACK = int(_env("SLACK", "2"))
-MAX_WAIT = int(_env("MAX_WAIT", "8"))
-BLOCKED_EXTRA = int(_env("BLOCKED_EXTRA", "8"))
+DETOUR_SLACK = int(__import__("os").environ.get("L4_SLACK", "2"))
+MAX_WAIT = int(__import__("os").environ.get("L4_MAX_WAIT", "8"))
+BLOCKED_EXTRA = int(__import__("os").environ.get("L4_BLOCKED_EXTRA", "8"))
 # Swap the plan's stations for nearer equivalents.
-RELOCATE = _env("RELOCATE", "1") == "1"
-NEW_WALK = _env("WALK", "1") == "1"
-USE_LIBRARY = _env("LIBRARY", "1") == "1"
+RELOCATE = __import__("os").environ.get("L4_RELOCATE", "1") == "1"
+NEW_WALK = __import__("os").environ.get("L4_WALK", "1") == "1"
+USE_LIBRARY = __import__("os").environ.get("L4_LIBRARY", "1") == "1"
 # Local evaluation only (with L4_SYNC): ticks each planner call would cost
 # in a real match, where the host does not wait for the planner.
-CALL_TICKS = int(_env("CALL_TICKS", "0"))
+CALL_TICKS = int(__import__("os").environ.get("L4_CALL_TICKS", "0"))
 # Ticks between two attempts to mend a plan rather than plan afresh.
 REPAIR_GAP = 20
-REPAIR = _env("REPAIR", "1") == "1"
-EARLY = _env("EARLY", "1") == "1"
+REPAIR = __import__("os").environ.get("L4_REPAIR", "1") == "1"
+EARLY = __import__("os").environ.get("L4_EARLY", "1") == "1"
 # Leave alone orders an opponent is visibly making (holds part of).
-RACE_CHECK = _env("RACE_CHECK", "0") == "1"
+RACE_CHECK = __import__("os").environ.get("L4_RACE_CHECK", "0") == "1"
 # Call the planner when food already made lies about (it may use it).
-USE_MADE = _env("MADE", "1") == "1"
+USE_MADE = __import__("os").environ.get("L4_MADE", "1") == "1"
 # Leave food teammates put in stations or on counters to them, and read
 # what they are cooking from it.
-RESPECT_MATES = _env("RESPECT_MATES", "1") == "1"
+RESPECT_MATES = __import__("os").environ.get("L4_RESPECT_MATES", "1") == "1"
 ABANDONED_TICKS = 40
 # Count the teammate in the order auction (right when it runs this code);
 # otherwise only orders it visibly makes are left to it.
-MATE_AUCTION = _env("MATE_AUCTION", "0") == "1"
+MATE_AUCTION = __import__("os").environ.get("L4_MATE_AUCTION", "0") == "1"
 # Weight of the ticks our food sits unattended in a shared station when
 # choosing between plans (others may take it).
-EXPOSED = float(_env("EXPOSED", "0"))
+EXPOSED = float(__import__("os").environ.get("L4_EXPOSED", "0"))
 # Plan around chefs standing in the way; step aside when face to face.
-UNJAM = _env("UNJAM", "1") == "1"
+UNJAM = __import__("os").environ.get("L4_UNJAM", "1") == "1"
 # With nothing to do, step off tiles others need.
-PARK = _env("PARK", "1") == "1"
+PARK = __import__("os").environ.get("L4_PARK", "1") == "1"
 # Prefer storages, plate dispensers and bins on our own side.
-AVOID = _env("AVOID", "1") == "1"
+AVOID = __import__("os").environ.get("L4_AVOID", "1") == "1"
 # Plan with only the foods that matter for the dish (much quicker), and
 # what that costs in a match (ticks, for local evaluation).
-PRUNE = _env("PRUNE", "1") == "1"
-PRUNED_TICKS = float(_env("PRUNED_TICKS", "1"))
+PRUNE = __import__("os").environ.get("L4_PRUNE", "1") == "1"
+PRUNED_TICKS = float(__import__("os").environ.get("L4_PRUNED_TICKS", "1"))
 # After getting stuck, plan the same dish again first.
-STICKY = _env("STICKY", "0") == "1"
+STICKY = __import__("os").environ.get("L4_STICKY", "0") == "1"
 # Local evaluation only: print plans started and dishes served.
 # Give up a dish early on once the teammate is visibly making it too (holds
 # or has put down food only that dish needs), so the two do not race for
 # the same ticket and one of them throw its work away.
-YIELD = _env("YIELD", "1") == "1"
-YIELD_FRACTION = float(_env("YIELD_FRACTION", "0.4"))
+YIELD = __import__("os").environ.get("L4_YIELD", "1") == "1"
+YIELD_FRACTION = float(__import__("os").environ.get("L4_YIELD_FRACTION", "0.4"))
 # Wait beside food that is cooking by itself for as long as it takes, not a
 # count of ticks fixed when the wait began.
-PATIENT = _env("PATIENT", "1") == "1"
+PATIENT = __import__("os").environ.get("L4_PATIENT", "1") == "1"
 # Skip the rough time check for an order part of which is already made: the
 # plan's own timing decides.
-PROGRESS = _env("PROGRESS", "1") == "1"
+PROGRESS = __import__("os").environ.get("L4_PROGRESS", "1") == "1"
 # Multiplier applied to EXPECTED_STEPS for the rough-time pre-filter in
 # _choose_orders.  Orders with time_left < EXPECTED_STEPS * ROUGH_FRAC are
 # skipped before the planner is called.  Default 0.8 matches the original
 # hard-coded value; lower values admit more near-deadline orders (tested:
 # held-ingredient variants hurt mixed mode, reverted).
-ROUGH_FRAC = float(_env("ROUGH_FRAC", "0.8"))
-LOG = _env("LOG") == "1"
+ROUGH_FRAC = float(__import__("os").environ.get("L4_ROUGH_FRAC", "0.8"))
+LOG = __import__("os").environ.get("L4_LOG") == "1"
 # Timesteps in a tournament game; nothing served after this counts.
-GAME_TICKS = int(_env("GAME_TICKS", "300"))
+GAME_TICKS = int(__import__("os").environ.get("L4_GAME_TICKS", "300"))
 # Drop orders that cannot be served in time even as a last resort.
-STRICT = _env("STRICT", "1") == "1"
-# Opponents online finish dishes faster than our own step estimates; their
-# estimated time is scaled by this, so we race them less often.
-OPP_ETA = float(_env("OPP_ETA", "0.8"))
+STRICT = __import__("os").environ.get("L4_STRICT", "1") == "1"
 # Matches run slower than the plan's estimate (other chefs in the way).
 SLACK = 1.15
 
@@ -151,7 +142,7 @@ def _short(name: str) -> str:
     return name.rsplit("/", 1)[-1]
 
 
-CPU_TICKS = _env("CPU_TICKS") == "1"
+CPU_TICKS = __import__("os").environ.get("L4_CPU_TICKS") == "1"
 
 
 def _cpu_now() -> float:
@@ -984,8 +975,6 @@ class OpenController(Controller):
                 return 5.0
             if held & _components(state, entry.name):
                 steps *= 0.6
-            if agent.id != chef_id and not mate(agent):
-                steps *= OPP_ETA
             return steps
 
         skipped = list(left_to_mates)
