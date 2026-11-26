@@ -1,3 +1,5 @@
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 # Too Many Chefs! The Open Kitchen Challenge
 
 Too Many Chefs is a cooking game inspired by Overcooked. Chefs move through a
